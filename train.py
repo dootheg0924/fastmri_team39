@@ -1,16 +1,14 @@
-import torch
 import argparse
-import shutil
-import os, sys
+import sys
 from pathlib import Path
 
-if os.getcwd() + '/utils/model/' not in sys.path:
-    sys.path.insert(1, os.getcwd() + '/utils/model/')
-from utils.learning.train_part import train
+REPO_ROOT = Path(__file__).resolve().parent
+MODEL_ROOT = REPO_ROOT / 'utils' / 'model'
+if str(MODEL_ROOT) not in sys.path:
+    sys.path.insert(1, str(MODEL_ROOT))
+from utils.learning.train_part import train  # noqa: E402
 
-if os.getcwd() + '/utils/common/' not in sys.path:
-    sys.path.insert(1, os.getcwd() + '/utils/common/')
-from utils.common.utils import seed_fix
+from utils.common.utils import seed_fix  # noqa: E402
 
 
 def parse():
@@ -24,6 +22,12 @@ def parse():
     parser.add_argument('-n', '--net-name', type=Path, default='test_varnet', help='Name of network')
     parser.add_argument('-t', '--data-path-train', type=Path, default='/Data/train/', help='Directory of train data')
     parser.add_argument('-v', '--data-path-val', type=Path, default='/Data/val/', help='Directory of validation data')
+    parser.add_argument('--result-root', type=Path, default='../result', help='Root directory for experiment outputs')
+    parser.add_argument('--resume', action='store_true', help='Resume from <experiment>/checkpoints/model.pt when present')
+    parser.add_argument('--checkpoint-interval', type=int, default=0,
+                        help='Keep an epoch snapshot every N epochs; 0 disables snapshots')
+    parser.add_argument('--num-workers', type=int, default=0, help='DataLoader worker processes')
+    parser.add_argument('--pin-memory', action='store_true', help='Use pinned DataLoader memory for CUDA transfers')
     
     parser.add_argument('--cascade', type=int, default=1, help='Number of cascades | Should be less than 12') ## important hyperparameter
     parser.add_argument('--chans', type=int, default=9, help='Number of channels for cascade U-Net | 18 in original varnet') ## important hyperparameter
@@ -43,10 +47,10 @@ if __name__ == '__main__':
     if args.seed is not None:
         seed_fix(args.seed)
 
-    args.exp_dir = '../result' / args.net_name / 'checkpoints'
-    args.val_dir = '../result' / args.net_name / 'reconstructions_val'
-    args.main_dir = '../result' / args.net_name / __file__
-    args.val_loss_dir = '../result' / args.net_name
+    experiment_dir = args.result_root / args.net_name
+    args.exp_dir = experiment_dir / 'checkpoints'
+    args.val_dir = experiment_dir / 'reconstructions_val'
+    args.val_loss_dir = experiment_dir
 
     args.exp_dir.mkdir(parents=True, exist_ok=True)
     args.val_dir.mkdir(parents=True, exist_ok=True)

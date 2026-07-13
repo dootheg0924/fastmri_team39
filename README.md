@@ -135,3 +135,12 @@ Leaderboard Recon Time : 193.96s (87.6 ms/slice)
 - loss 그래프 혹은 기록
 - 모델 weight file
 - 모델 설명 ppt
+
+## 8. Tracked experiments
+
+| ID | Configuration | Status | Documentation |
+| --- | --- | --- | --- |
+| 001 | Baby VarNet baseline (`c1/ch9/s4`, 5 epochs) | Complete | [`reports/test_Varnet`](reports/test_Varnet) |
+| 002 | Long VarNet (`c6/ch12/s4`, 80 epochs) | Ready to run | [`experiments/002_varnet_c6_long`](experiments/002_varnet_c6_long) |
+
+Experiment 002 includes a VESSL entrypoint, automatic checkpoint resume, GPU telemetry, training plots, challenge-aligned validation metrics, and a lightweight result export workflow. See its experiment README for the copy-paste VESSL command and operational checklist.

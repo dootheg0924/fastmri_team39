@@ -10,7 +10,6 @@ by the model code in utils/learning and utils/model.
 
 import argparse
 import json
-import os
 import statistics
 import sys
 import time
@@ -19,12 +18,14 @@ from pathlib import Path
 import h5py
 import torch
 
-if os.getcwd() + '/utils/model/' not in sys.path:
-    sys.path.insert(1, os.getcwd() + '/utils/model/')
+REPO_ROOT = Path(__file__).resolve().parent
+MODEL_ROOT = REPO_ROOT / 'utils' / 'model'
+if str(MODEL_ROOT) not in sys.path:
+    sys.path.insert(1, str(MODEL_ROOT))
 
-from utils.common.metrics import SSIM, foreground_mask, ssim_bbox, ssim_full
-from utils.common.utils import save_reconstructions
-from utils.learning.test_part import INPUT_KIND, load_model, prep_volume, recon_slice
+from utils.common.metrics import SSIM, foreground_mask, ssim_bbox, ssim_full  # noqa: E402
+from utils.common.utils import save_reconstructions  # noqa: E402
+from utils.learning.test_part import load_model, prep_volume, recon_slice  # noqa: E402
 
 WARMUP_SLICES = 5
 VOLUME_TIME_WARN_S = 60.0
@@ -37,6 +38,7 @@ def parse():
     parser.add_argument('-g', '--GPU_NUM', type=int, default=0)
     parser.add_argument('-n', '--net_name', type=Path, default='test_varnet')
     parser.add_argument('-p', '--path_data', type=Path, default='/Data/leaderboard/')
+    parser.add_argument('--result-root', type=Path, default='../result')
     parser.add_argument('--cascade', type=int, default=1, help='Number of cascades | Should be less than 12')
     parser.add_argument('--chans', type=int, default=9, help='Number of channels for cascade U-Net')
     parser.add_argument('--sens_chans', type=int, default=4, help='Number of channels for sensitivity map U-Net')
@@ -116,7 +118,7 @@ def run_acc(model, ssim, device, acc_dir, save_dir):
 
 if __name__ == '__main__':
     args = parse()
-    args.exp_dir = '../result' / args.net_name / 'checkpoints'
+    args.exp_dir = args.result_root / args.net_name / 'checkpoints'
     assert (args.path_data / 'acc4').is_dir() and (args.path_data / 'acc8').is_dir()
 
     device = torch.device(f'cuda:{args.GPU_NUM}' if torch.cuda.is_available() else 'cpu')
@@ -125,7 +127,7 @@ if __name__ == '__main__':
 
     model = load_model(args, device)
     ssim = SSIM().to(device=device)
-    recon_base = '../result' / args.net_name / 'reconstructions_leaderboard'
+    recon_base = args.result_root / args.net_name / 'reconstructions_leaderboard'
 
     full4, bbox4, t4, m4, slow4, n4 = run_acc(model, ssim, device, args.path_data / 'acc4', recon_base / 'acc4')
     full8, bbox8, t8, m8, slow8, n8 = run_acc(model, ssim, device, args.path_data / 'acc8', recon_base / 'acc8')

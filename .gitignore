@@ -12,8 +12,9 @@ env/
 nohup.out
 
 # Optional safety only
-Data/
-data/
-result/
-results/
-leaderboard/
+/Data/
+/data/
+/result/
+/results/
+/leaderboard/
+*.tmp

@@ -46,14 +46,14 @@ def recon_slice(model, ctx, s):
     return model(kspace, mask_t)[0]
 
 
-def test(args, model, data_loader):
+def test(args, model, data_loader, device):
     model.eval()
     reconstructions = defaultdict(dict)
 
     with torch.no_grad():
         for (mask, kspace, _, _, fnames, slices) in data_loader:
-            kspace = kspace.cuda(non_blocking=True)
-            mask = mask.cuda(non_blocking=True)
+            kspace = kspace.to(device=device, non_blocking=True)
+            mask = mask.to(device=device, non_blocking=True)
             output = model(kspace, mask)
 
             for i in range(output.shape[0]):
@@ -68,11 +68,12 @@ def test(args, model, data_loader):
 
 def forward(args):
     device = torch.device(f'cuda:{args.GPU_NUM}' if torch.cuda.is_available() else 'cpu')
-    torch.cuda.set_device(device)
-    print('Current cuda device ', torch.cuda.current_device())
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+    print('Reconstruction device:', device)
 
     model = load_model(args, device)
 
     forward_loader = create_data_loaders(data_path=args.data_path, args=args, isforward=True)
-    reconstructions, inputs = test(args, model, forward_loader)
+    reconstructions, inputs = test(args, model, forward_loader, device)
     save_reconstructions(reconstructions, args.forward_dir, inputs=inputs)
