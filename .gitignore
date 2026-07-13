@@ -1,3 +1,19 @@
-venv
-env
-__pycache__
+# Python / environment
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+venv/
+env/
+.venv/
+
+# Local execution logs
+*.log
+nohup.out
+
+# Optional safety only
+Data/
+data/
+result/
+results/
+leaderboard/
