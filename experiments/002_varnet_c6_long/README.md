@@ -54,7 +54,7 @@ If VESSL already cloned the repository, use this start command:
 
 ```bash
 set -euo pipefail
-cd /root/FastMRI_challenge
+cd /root/fastmri_team39
 git fetch origin exp/002-varnet-c6-long
 git switch --detach origin/exp/002-varnet-c6-long
 INSTALL_DEPS=1 DATA_ROOT=/root/Data RESULT_ROOT=/root/result \
@@ -86,7 +86,7 @@ watch -n 1 nvidia-smi
 Partial analysis can be regenerated while training is active:
 
 ```bash
-cd /root/FastMRI_challenge
+cd /root/fastmri_team39
 python scripts/analyze_training.py \
   --exp-name varnet_c6_ch12_s4_ep80_lr3e4 \
   --result-root /root/result
@@ -128,7 +128,7 @@ Global logs live in `/root/result/logs/`. The run script appends rather than tru
 Use the same architecture flags that created the checkpoint:
 
 ```bash
-cd /root/FastMRI_challenge
+cd /root/fastmri_team39
 python recon_eval.py \
   -n varnet_c6_ch12_s4_ep80_lr3e4 \
   -p /root/Data/leaderboard \
