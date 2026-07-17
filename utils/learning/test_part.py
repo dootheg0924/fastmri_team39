@@ -6,7 +6,7 @@ from collections import defaultdict
 from utils.common.utils import save_reconstructions
 from utils.data.load_data import create_data_loaders
 from utils.data.transforms import to_tensor
-from utils.model.varnet import VarNet
+from utils.learning.train_part import build_model
 
 # ---------------------------------------------------------------------------
 # Team-editable reconstruction contract.
@@ -18,10 +18,12 @@ INPUT_KIND = "kspace"      # harness delivers the kspace H5 to prep_volume
 
 
 def load_model(args, device):
-    model = VarNet(num_cascades=args.cascade,
-                   chans=args.chans,
-                   sens_chans=args.sens_chans).to(device=device)
     checkpoint = torch.load(args.exp_dir / 'best_model.pt', map_location='cpu', weights_only=False)
+    # Rebuild the model from the config stored in the checkpoint (save_model
+    # stores `args`), so recon_eval.py reproduces the trained architecture
+    # without knowing about --model-name or the fivarnet hyperparameters.
+    # Fall back to the caller's args for checkpoints that predate this.
+    model = build_model(checkpoint.get('args', args)).to(device=device)
     model.load_state_dict(checkpoint['model'])
     model.eval()
     return model
@@ -51,7 +53,7 @@ def test(args, model, data_loader, device):
     reconstructions = defaultdict(dict)
 
     with torch.no_grad():
-        for (mask, kspace, _, _, fnames, slices) in data_loader:
+        for (mask, kspace, _, _, fnames, slices, _) in data_loader:
             kspace = kspace.to(device=device, non_blocking=True)
             mask = mask.to(device=device, non_blocking=True)
             output = model(kspace, mask)
