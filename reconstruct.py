@@ -1,11 +1,14 @@
 import argparse
-from pathlib import Path
-import os, sys
-if os.getcwd() + '/utils/model/' not in sys.path:
-    sys.path.insert(1, os.getcwd() + '/utils/model/')
-
-from utils.learning.test_part import forward
+import sys
 import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
+MODEL_ROOT = REPO_ROOT / 'utils' / 'model'
+if str(MODEL_ROOT) not in sys.path:
+    sys.path.insert(1, str(MODEL_ROOT))
+
+from utils.learning.test_part import forward  # noqa: E402
 
     
 def parse():
@@ -15,6 +18,7 @@ def parse():
     parser.add_argument('-b', '--batch-size', type=int, default=1, help='Batch size')
     parser.add_argument('-n', '--net_name', type=Path, default='test_varnet', help='Name of network')
     parser.add_argument('-p', '--path_data', type=Path, default='/Data/leaderboard/', help='Directory of test data')
+    parser.add_argument('--result-root', type=Path, default='../result', help='Root directory for experiment outputs')
     
     parser.add_argument('--cascade', type=int, default=1, help='Number of cascades | Should be less than 12')
     parser.add_argument('--chans', type=int, default=9, help='Number of channels for cascade U-Net')
@@ -27,11 +31,11 @@ def parse():
 
 if __name__ == '__main__':
     args = parse()
-    args.exp_dir = '../result' / args.net_name / 'checkpoints'
+    args.exp_dir = args.result_root / args.net_name / 'checkpoints'
 
     # acc4
     args.data_path = args.path_data / "acc4"
-    args.forward_dir = '../result' / args.net_name / 'reconstructions_leaderboard' / "acc4"
+    args.forward_dir = args.result_root / args.net_name / 'reconstructions_leaderboard' / "acc4"
     print(args.forward_dir)
     start_acc4 = time.time()
     forward(args)
@@ -39,7 +43,7 @@ if __name__ == '__main__':
 
     # acc8
     args.data_path = args.path_data / "acc8"
-    args.forward_dir = '../result' / args.net_name / 'reconstructions_leaderboard' / "acc8"
+    args.forward_dir = args.result_root / args.net_name / 'reconstructions_leaderboard' / "acc8"
     print(args.forward_dir)
     start_acc8 = time.time()
     forward(args)

@@ -11,8 +11,8 @@
 
 ### 폴더의 전체 구조
 ![image](docs/fastmri_folder_structure.png)
-* `FastMRI_challenge`, `Data`, `result` 폴더가 위의 구조대로 설정되어 있어야 default argument를 활용할 수 있습니다.
-* 본 github repository는 `FastMRI_challenge` 폴더입니다.
+* `fastmri_team39`, `Data`, `result` 폴더가 같은 상위 경로에 있으면 default argument를 활용할 수 있습니다.
+* 본 GitHub repository의 기본 clone 폴더명은 `fastmri_team39`입니다.
 * `Data` 폴더는 MRI data 파일을 담고 있으며 아래에 상세 구조를 첨부하겠습니다.
 * `result` 폴더는 학습한 모델의 weights을 기록하고 validation, leaderboard dataset의 reconstruction image를 저장하는데 활용되며, 아래에 상세 구조를 첨부하겠습니다.
 
@@ -135,3 +135,12 @@ Leaderboard Recon Time : 193.96s (87.6 ms/slice)
 - loss 그래프 혹은 기록
 - 모델 weight file
 - 모델 설명 ppt
+
+## 8. Tracked experiments
+
+| ID | Configuration | Status | Documentation |
+| --- | --- | --- | --- |
+| 001 | Baby VarNet baseline (`c1/ch9/s4`, 5 epochs) | Complete | [`reports/test_Varnet`](reports/test_Varnet) |
+| 002 | Long VarNet (`c6/ch12/s4`, 80 epochs) | Ready to run | [`experiments/002_varnet_c6_long`](experiments/002_varnet_c6_long) |
+
+Experiment 002 includes a VESSL entrypoint, automatic checkpoint resume, GPU telemetry, training plots, challenge-aligned validation metrics, and a lightweight result export workflow. See its experiment README for the copy-paste VESSL command and operational checklist.

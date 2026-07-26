@@ -1,5 +1,4 @@
 import h5py
-import random
 from utils.data.transforms import DataTransform
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
@@ -65,7 +64,7 @@ class SliceData(Dataset):
 
 
 def create_data_loaders(data_path, args, shuffle=False, isforward=False):
-    if isforward == False:
+    if not isforward:
         max_key_ = args.max_key
         target_key_ = args.target_key
     else:
@@ -83,5 +82,8 @@ def create_data_loaders(data_path, args, shuffle=False, isforward=False):
         dataset=data_storage,
         batch_size=args.batch_size,
         shuffle=shuffle,
+        num_workers=getattr(args, 'num_workers', 0),
+        pin_memory=getattr(args, 'pin_memory', False),
+        persistent_workers=getattr(args, 'num_workers', 0) > 0,
     )
     return data_loader
