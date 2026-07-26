@@ -39,8 +39,10 @@ def main():
     parser.add_argument("--pools", type=int, default=4)
     parser.add_argument("--sens-pools", type=int, default=4)
     parser.add_argument("--attention-cascades", type=int, nargs="*", default=[0])
+    parser.add_argument("--split-attention-cascades", type=int, nargs="*", default=[])
     parser.add_argument("--kspace-mult-factor", type=float, default=1e6)
     parser.add_argument("--no-grad-checkpoint", action="store_true")
+    parser.add_argument("--acc-film", action="store_true")
     parser.add_argument("--bbox-loss-weight", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -75,6 +77,8 @@ def main():
         attention_cascades=args.attention_cascades,
         kspace_mult_factor=args.kspace_mult_factor,
         no_grad_checkpoint=args.no_grad_checkpoint,
+        acc_film=args.acc_film,
+        split_attention_cascades=args.split_attention_cascades,
     )
     model = build_model(model_args).to(device=device)
     loss_fn = BboxAwareSSIMLoss(bbox_weight=args.bbox_loss_weight).to(device=device)
@@ -84,11 +88,34 @@ def main():
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
     model.train()
+    optimizer.zero_grad(set_to_none=True)
     output = model(kspace, mask)
     loss = loss_fn(output, target, maximum, boxes)
     if not torch.isfinite(output).all() or not torch.isfinite(loss):
         raise RuntimeError("Smoke test produced a non-finite output or loss")
     loss.backward()
+    if args.split_attention_cascades:
+        acceleration = model._infer_acceleration(mask)
+        for cascade_index in args.split_attention_cascades:
+            block = model.cascades[cascade_index]
+            active = (
+                block.attention_layer_acc8
+                if acceleration >= 6
+                else block.attention_layer
+            )
+            inactive = (
+                block.attention_layer
+                if acceleration >= 6
+                else block.attention_layer_acc8
+            )
+            if not any(parameter.grad is not None for parameter in active.parameters()):
+                raise RuntimeError(
+                    f"Cascade {cascade_index} selected attention expert received no gradient."
+                )
+            if any(parameter.grad is not None for parameter in inactive.parameters()):
+                raise RuntimeError(
+                    f"Cascade {cascade_index} inactive attention expert received a gradient."
+                )
     optimizer.step()
     torch.cuda.synchronize(device)
     peak_mib = torch.cuda.max_memory_allocated(device) / (1024 ** 2)

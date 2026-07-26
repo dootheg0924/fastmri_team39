@@ -24,6 +24,24 @@ def parse():
     parser.add_argument('-v', '--data-path-val', type=Path, default='/Data/val/', help='Directory of validation data')
     parser.add_argument('--result-root', type=Path, default='../result', help='Root directory for experiment outputs')
     parser.add_argument('--resume', action='store_true', help='Resume from <experiment>/checkpoints/model.pt when present')
+    parser.add_argument(
+        '--warm-start-checkpoint',
+        type=Path,
+        default=None,
+        help='Initialize a new experiment from an older checkpoint with compatible state migration',
+    )
+    parser.add_argument(
+        '--additional-epochs',
+        type=int,
+        default=None,
+        help='When warm-starting, train for this many epochs after the source checkpoint epoch',
+    )
+    parser.add_argument(
+        '--expected-warm-start-epoch',
+        type=int,
+        default=None,
+        help='Fail unless the warm-start checkpoint has this completed epoch count',
+    )
     parser.add_argument('--checkpoint-interval', type=int, default=0,
                         help='Keep an epoch snapshot every N epochs; 0 disables snapshots')
     parser.add_argument('--num-workers', type=int, default=0, help='DataLoader worker processes')
@@ -51,6 +69,24 @@ def parse():
                         help='[fivarnet] Acceleration-conditioned FiLM (per-acc4/acc8 channel-wise '
                              'gamma/beta on each feature cascade). Identity at init, so enabling it '
                              'does not change the model until training moves the parameters')
+    parser.add_argument(
+        '--split-attention-cascades',
+        type=int,
+        nargs='*',
+        default=[],
+        help='[fivarnet] Attention cascade indices with copied acc4/acc8 experts',
+    )
+    parser.add_argument(
+        '--balance-accelerations',
+        action='store_true',
+        help='Train on an exact alternating 50/50 acc4/acc8 slice stream',
+    )
+    parser.add_argument(
+        '--acceleration-balance-mode',
+        choices=['oversample', 'undersample'],
+        default='oversample',
+        help='Balance by repeating the minority group or dropping majority slices',
+    )
     parser.add_argument('--bbox-loss-weight', type=float, default=1.0,
                         help='Weight of the annotation-box SSIM loss term; 0 = pure foreground SSIM loss')
     parser.add_argument('--input-key', type=str, default='kspace', help='Name of input key')

@@ -1,5 +1,7 @@
 import shutil
+import copy
 import csv
+import gc
 import json
 import numpy as np
 import torch
@@ -13,7 +15,7 @@ import sys
 from datetime import datetime, timezone
 
 from collections import defaultdict
-from utils.data.load_data import create_data_loaders
+from utils.data.load_data import acceleration_from_filename, create_data_loaders
 from utils.common.utils import save_reconstructions
 from utils.common.bbox_loss import BboxAwareSSIMLoss
 from utils.model.varnet import VarNet
@@ -52,12 +54,15 @@ def build_model(args):
             kspace_mult_factor=getattr(args, 'kspace_mult_factor', 1e6),
             use_checkpoint=not getattr(args, 'no_grad_checkpoint', False),
             use_acc_film=getattr(args, 'acc_film', False),
+            split_attention_cascades=getattr(args, 'split_attention_cascades', []),
         )
     raise ValueError(f'Unknown model name: {model_name}')
 
 
 def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
     model.train()
+    if hasattr(data_loader.sampler, 'set_epoch'):
+        data_loader.sampler.set_epoch(epoch)
     start_epoch = start_iter = time.perf_counter()
     len_loader = len(data_loader)
     total_loss = 0.
@@ -70,9 +75,11 @@ def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
         maximum = maximum.to(device=device, non_blocking=True)
         # boxes stay on the CPU: only their integer coordinates are used for cropping.
 
+        # With hard-routed experts, a non-selected expert must keep grad=None;
+        # otherwise Adam momentum can update it on the wrong acceleration.
+        optimizer.zero_grad(set_to_none=True)
         output = model(kspace, mask)
         loss = loss_type(output, target, maximum, boxes)
-        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
@@ -92,7 +99,12 @@ def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
 def _acc_bucket(fname):
     """Route a volume filename to its acceleration bucket (leaderboard uses two
     directories, acc4 / acc8; validation volumes carry the tag in the name)."""
-    return 'acc8' if 'acc8' in fname else 'acc4'
+    acceleration = acceleration_from_filename(fname)
+    if acceleration is None:
+        raise ValueError(
+            f'Validation filename must contain one _acc4_ or _acc8_ tag: {fname}'
+        )
+    return f'acc{acceleration}'
 
 
 def validate(args, model, val_metric, data_loader, device):
@@ -213,10 +225,14 @@ def save_model(args, exp_dir, epoch, model, optimizer, best_val_loss, is_new_bes
         'args': args,
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
+        'optimizer_parameter_names': [
+            name for name, _ in model.named_parameters()
+        ],
         'best_val_loss': float(best_val_loss),
         'exp_dir': exp_dir,
         'history': history,
         'rng_state': capture_rng_state(),
+        'warm_start_metadata': getattr(args, 'warm_start_metadata', None),
     }
     model_path = exp_dir / 'model.pt'
     tmp_path = exp_dir / 'model.pt.tmp'
@@ -245,7 +261,214 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
     best_val_loss = checkpoint.get('best_val_loss', float('inf'))
     if torch.is_tensor(best_val_loss):
         best_val_loss = best_val_loss.item()
-    return checkpoint['epoch'], float(best_val_loss), checkpoint.get('history', [])
+    return (
+        checkpoint['epoch'],
+        float(best_val_loss),
+        checkpoint.get('history', []),
+        checkpoint.get('warm_start_metadata'),
+    )
+
+
+WARM_START_MODEL_FIELDS = (
+    'model_name',
+    'cascade',
+    'image_cascades',
+    'chans',
+    'sens_chans',
+    'pools',
+    'sens_pools',
+    'attention_cascades',
+    'kspace_mult_factor',
+    'acc_film',
+    'bbox_loss_weight',
+    'input_key',
+    'target_key',
+    'max_key',
+)
+
+
+def _namespace_value(namespace, name, default=None):
+    if isinstance(namespace, dict):
+        return namespace.get(name, default)
+    return getattr(namespace, name, default)
+
+
+def inherit_warm_start_args(args, source_args):
+    """Use the checkpoint's actual model/loss shape, retaining new run controls."""
+    inherited = {}
+    for name in WARM_START_MODEL_FIELDS:
+        source_value = _namespace_value(source_args, name, None)
+        if source_value is None:
+            continue
+        source_value = copy.deepcopy(source_value)
+        if getattr(args, name, None) != source_value:
+            inherited[name] = {
+                'requested': getattr(args, name, None),
+                'checkpoint': source_value,
+            }
+        setattr(args, name, source_value)
+    if getattr(args, 'model_name', None) != 'fivarnet':
+        raise ValueError('Attention-split warm-start requires a FI-VarNet checkpoint.')
+    return inherited
+
+
+def _acc8_source_name(name, source_names):
+    """Map a split acc8 expert parameter to its unsplit checkpoint parameter."""
+    if name in source_names:
+        return name
+    token = '.attention_layer_acc8.'
+    if token in name:
+        candidate = name.replace(token, '.attention_layer.', 1)
+        if candidate in source_names:
+            return candidate
+    return None
+
+
+def _clone_optimizer_state(state):
+    return {
+        key: value.detach().clone() if torch.is_tensor(value) else copy.deepcopy(value)
+        for key, value in state.items()
+    }
+
+
+def migrate_optimizer_state_by_name(
+    source_optimizer_state,
+    source_parameter_names,
+    target_model,
+    target_optimizer,
+):
+    """Copy Adam state by parameter name and clone shared attention state to acc8.
+
+    The epoch-40 checkpoint predates the extra acc8 module, so a normal
+    ``optimizer.load_state_dict`` fails on the changed parameter-group length.
+    This migration preserves every common parameter's moments and gives the
+    copied expert an independent clone of the original attention moments.
+    """
+    if len(source_optimizer_state.get('param_groups', [])) != 1:
+        raise ValueError('Warm-start currently requires one optimizer parameter group.')
+    source_group = source_optimizer_state['param_groups'][0]
+    source_ids = list(source_group['params'])
+    if len(source_ids) != len(source_parameter_names):
+        raise ValueError(
+            'Checkpoint optimizer parameter count does not match the source model: '
+            f'{len(source_ids)} optimizer entries vs {len(source_parameter_names)} names.'
+        )
+    source_id_by_name = dict(zip(source_parameter_names, source_ids))
+    source_names = set(source_id_by_name)
+
+    migrated = target_optimizer.state_dict()
+    if len(migrated['param_groups']) != 1:
+        raise ValueError('Target warm-start optimizer must have one parameter group.')
+    target_group = migrated['param_groups'][0]
+    target_ids = list(target_group['params'])
+    target_names = [name for name, _ in target_model.named_parameters()]
+    if len(target_ids) != len(target_names):
+        raise ValueError('Target optimizer parameter order does not match target model.')
+
+    copied_group = copy.deepcopy(source_group)
+    copied_group['params'] = target_ids
+    copied_group.pop('param_names', None)
+    migrated['param_groups'] = [copied_group]
+    migrated['state'] = {}
+
+    target_parameter_by_name = dict(target_model.named_parameters())
+    for target_name, target_id in zip(target_names, target_ids):
+        source_name = _acc8_source_name(target_name, source_names)
+        if source_name is None:
+            raise ValueError(f'No warm-start optimizer source for {target_name}.')
+        source_id = source_id_by_name[source_name]
+        if source_id not in source_optimizer_state['state']:
+            continue
+        state = _clone_optimizer_state(source_optimizer_state['state'][source_id])
+        parameter = target_parameter_by_name[target_name]
+        for key, value in state.items():
+            if (
+                torch.is_tensor(value)
+                and value.ndim > 0
+                and value.numel() > 1
+                and value.shape != parameter.shape
+            ):
+                raise ValueError(
+                    f'Optimizer state shape mismatch for {target_name}.{key}: '
+                    f'{tuple(value.shape)} vs {tuple(parameter.shape)}'
+                )
+        migrated['state'][target_id] = state
+
+    target_optimizer.load_state_dict(migrated)
+
+
+def _move_optimizer_state(optimizer, device):
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device=device)
+
+
+def load_attention_split_warm_start(checkpoint, model, optimizer, device):
+    """Migrate an unsplit FI-VarNet checkpoint into a split-attention model."""
+    source_args = checkpoint['args']
+    source_split = _namespace_value(source_args, 'split_attention_cascades', [])
+    if source_split:
+        raise ValueError(
+            'The source checkpoint already contains split attention; use --resume instead.'
+        )
+    split_cascades = getattr(model, 'cascades', None)
+    requested_split = [
+        i for i, block in enumerate(split_cascades or [])
+        if getattr(block, 'attention_layer_acc8', None) is not None
+    ]
+    if not requested_split:
+        raise ValueError('Warm-start target has no split attention cascades.')
+
+    source_state = checkpoint['model']
+    source_keys = set(source_state)
+    migrated_state = {}
+    for target_key in model.state_dict():
+        source_key = _acc8_source_name(target_key, source_keys)
+        if source_key is None:
+            raise ValueError(f'No warm-start model source for {target_key}.')
+        migrated_state[target_key] = source_state[source_key].detach().clone()
+    model.load_state_dict(migrated_state, strict=True)
+
+    source_parameter_names = checkpoint.get('optimizer_parameter_names')
+    if source_parameter_names is None:
+        # Reconstruct only long enough to recover the exact optimizer parameter
+        # ordering used by the old checkpoint. No source weights need be loaded.
+        source_model = build_model(source_args)
+        source_parameter_names = [
+            name for name, _ in source_model.named_parameters()
+        ]
+        del source_model
+        gc.collect()
+    migrate_optimizer_state_by_name(
+        checkpoint['optimizer'],
+        source_parameter_names,
+        model,
+        optimizer,
+    )
+    _move_optimizer_state(optimizer, device)
+
+    # These asserts protect the function-preserving late split.
+    for cascade_index in requested_split:
+        block = model.cascades[cascade_index]
+        acc4_state = block.attention_layer.state_dict()
+        acc8_state = block.attention_layer_acc8.state_dict()
+        if acc4_state.keys() != acc8_state.keys() or any(
+            not torch.equal(acc4_state[key], acc8_state[key])
+            for key in acc4_state
+        ):
+            raise RuntimeError(
+                f'Cascade {cascade_index} acc4/acc8 attention copies differ at warm-start.'
+            )
+
+    restore_rng_state(checkpoint.get('rng_state'))
+    source_epoch = int(checkpoint['epoch'])
+    source_lr = float(optimizer.param_groups[0]['lr'])
+    return source_epoch, source_lr, {
+        'source_epoch': source_epoch,
+        'source_best_val_loss': float(checkpoint.get('best_val_loss', float('nan'))),
+        'split_attention_cascades': requested_split,
+    }
 
 
 def git_commit():
@@ -296,6 +519,65 @@ def train(args):
         torch.cuda.set_device(device)
     print('Training device:', device)
 
+    checkpoint_path = args.exp_dir / 'model.pt'
+    resume_existing = args.resume and checkpoint_path.exists()
+    warm_start_path = getattr(args, 'warm_start_checkpoint', None)
+    warm_start_checkpoint = None
+    warm_start_rng = None
+    warm_started = False
+
+    if warm_start_path is not None and checkpoint_path.exists() and not args.resume:
+        raise FileExistsError(
+            f'{checkpoint_path} already exists. Use --resume or choose a new experiment name.'
+        )
+    if warm_start_path is not None and not resume_existing:
+        warm_start_path = Path(warm_start_path)
+        if not warm_start_path.is_file():
+            raise FileNotFoundError(f'Warm-start checkpoint not found: {warm_start_path}')
+        warm_start_checkpoint = torch.load(
+            warm_start_path, map_location='cpu', weights_only=False
+        )
+        source_epoch = int(warm_start_checkpoint['epoch'])
+        expected_epoch = getattr(args, 'expected_warm_start_epoch', None)
+        if expected_epoch is not None and source_epoch != expected_epoch:
+            raise ValueError(
+                f'Expected an epoch-{expected_epoch} warm-start checkpoint, '
+                f'but {warm_start_path} stores epoch {source_epoch}.'
+            )
+        additional_epochs = getattr(args, 'additional_epochs', None)
+        if additional_epochs is None or additional_epochs <= 0:
+            raise ValueError(
+                '--additional-epochs must be a positive integer when warm-starting.'
+            )
+        inherited = inherit_warm_start_args(args, warm_start_checkpoint['args'])
+        args.num_epochs = source_epoch + additional_epochs
+        args.warm_start_metadata = {
+            'source_checkpoint': str(warm_start_path.resolve()),
+            'source_epoch': source_epoch,
+            'additional_epochs': additional_epochs,
+            'inherited_argument_overrides': inherited,
+        }
+        print(
+            f'Preparing warm-start from {warm_start_path} at epoch {source_epoch}; '
+            f'target epoch: {args.num_epochs}.'
+        )
+        if inherited:
+            print('Using checkpoint model/loss arguments instead of conflicting CLI values:')
+            for name, values in inherited.items():
+                print(
+                    f'  {name}: requested={values["requested"]!r}, '
+                    f'checkpoint={values["checkpoint"]!r}'
+                )
+
+    if (
+        getattr(args, 'split_attention_cascades', [])
+        or getattr(args, 'balance_accelerations', False)
+    ) and args.batch_size != 1:
+        raise ValueError(
+            'Attention split and acceleration balancing require batch_size=1 '
+            'because FI-VarNet infers one acceleration per batch.'
+        )
+
     model = build_model(args)
     model.to(device=device)
 
@@ -308,13 +590,27 @@ def train(args):
     start_epoch = 0
     history = []
 
-    checkpoint_path = args.exp_dir / 'model.pt'
-    if args.resume and checkpoint_path.exists():
-        start_epoch, best_val_loss, history = load_checkpoint(
+    if resume_existing:
+        start_epoch, best_val_loss, history, warm_start_metadata = load_checkpoint(
             checkpoint_path, model, optimizer, device
         )
+        if warm_start_metadata is not None:
+            args.warm_start_metadata = warm_start_metadata
         print(f'Resumed from {checkpoint_path} at epoch {start_epoch}; '
               f'best val loss: {best_val_loss:.6f}')
+    elif warm_start_checkpoint is not None:
+        warm_start_rng = copy.deepcopy(warm_start_checkpoint.get('rng_state'))
+        start_epoch, source_lr, details = load_attention_split_warm_start(
+            warm_start_checkpoint, model, optimizer, device
+        )
+        args.lr = source_lr
+        args.warm_start_metadata.update(details)
+        args.warm_start_metadata['optimizer_state_migrated'] = True
+        warm_started = True
+        print(
+            f'Warm-started split attention at epoch {start_epoch}; '
+            f'preserved Adam learning rate {source_lr:g}.'
+        )
     elif args.resume:
         print(f'No checkpoint found at {checkpoint_path}; starting a new run.')
 
@@ -323,6 +619,59 @@ def train(args):
     
     train_loader = create_data_loaders(data_path = args.data_path_train, args = args, shuffle=True)
     val_loader = create_data_loaders(data_path = args.data_path_val, args = args)
+    if hasattr(train_loader.sampler, 'summary'):
+        summary = train_loader.sampler.summary()
+        sampling_path = args.val_loss_dir / 'acceleration_sampling.json'
+        sampling_tmp = sampling_path.with_suffix('.json.tmp')
+        with sampling_tmp.open('w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        os.replace(sampling_tmp, sampling_path)
+        print(
+            'Acceleration-balanced training sampler: '
+            f'mode={summary["mode"]}, source acc4/acc8='
+            f'{summary["source_acc4"]}/{summary["source_acc8"]}, '
+            f'sampled per acceleration={summary["sampled_per_acceleration"]}, '
+            f'steps per epoch={summary["samples_per_epoch"]}.'
+        )
+
+    if warm_started:
+        print(
+            f'Evaluating the function-preserving epoch-{start_epoch} '
+            'warm-start baseline.'
+        )
+        baseline_result, baseline_recons, baseline_targets, baseline_time = validate(
+            args, model, loss_type, val_loader, device
+        )
+        if baseline_result['num_subjects'] == 0:
+            raise RuntimeError('Validation loader produced no subjects at warm-start.')
+        best_val_loss = float(baseline_result['val_loss'])
+        baseline = {
+            **args.warm_start_metadata,
+            **{key: float(value) if isinstance(value, (float, np.floating)) else value
+               for key, value in baseline_result.items()},
+            'validation_time_sec': float(baseline_time),
+        }
+        baseline_path = args.val_loss_dir / 'warm_start_baseline.json'
+        baseline_tmp = baseline_path.with_suffix('.json.tmp')
+        with baseline_tmp.open('w', encoding='utf-8') as f:
+            json.dump(baseline, f, indent=2, ensure_ascii=False)
+        os.replace(baseline_tmp, baseline_path)
+        print(
+            f'Warm-start baseline: final={baseline_result["final_score"]:.4f}, '
+            f'full={baseline_result["ssim_full"]:.4f}, '
+            f'bbox={baseline_result["ssim_bbox"]:.4f}.'
+        )
+        # Validation worker setup may consume the global RNG. Restore the exact
+        # source state so the continuation starts from the epoch-40 RNG state.
+        restore_rng_state(warm_start_rng)
+        save_model(
+            args, args.exp_dir, start_epoch, model, optimizer,
+            best_val_loss, True, history,
+        )
+        del baseline_recons, baseline_targets, warm_start_checkpoint
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     if start_epoch >= args.num_epochs:
         print(f'Checkpoint already reached epoch {start_epoch}; requested epochs: {args.num_epochs}.')

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Experiment 003 runner (FI-VarNet + bbox-aware loss).
+# FI-VarNet experiment runner (bbox loss, optional FiLM/attention split).
 # Same telemetry/resume workflow as scripts/run_varnet_c6_long.sh, extended
 # with the fivarnet model arguments. Works on VESSL and on a local GTX 1080
 # (override DATA_ROOT/RESULT_ROOT via environment variables).
@@ -52,6 +52,12 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'KSPACE_MULT_FACTOR=%q\n' "${KSPACE_MULT_FACTOR}"
   printf 'BBOX_LOSS_WEIGHT=%q\n' "${BBOX_LOSS_WEIGHT}"
   printf 'ACC_FILM=%q\n' "${ACC_FILM:-0}"
+  printf 'SPLIT_ATTENTION_CASCADES=%q\n' "${SPLIT_ATTENTION_CASCADES:-}"
+  printf 'WARM_START_CHECKPOINT=%q\n' "${WARM_START_CHECKPOINT:-}"
+  printf 'EXPECTED_WARM_START_EPOCH=%q\n' "${EXPECTED_WARM_START_EPOCH:-}"
+  printf 'ADDITIONAL_EPOCHS=%q\n' "${ADDITIONAL_EPOCHS:-}"
+  printf 'BALANCE_ACCELERATIONS=%q\n' "${BALANCE_ACCELERATIONS:-0}"
+  printf 'ACCELERATION_BALANCE_MODE=%q\n' "${ACCELERATION_BALANCE_MODE:-oversample}"
   printf 'NUM_WORKERS=%q\n' "${NUM_WORKERS}"
   printf 'PIN_MEMORY=%q\n' "${PIN_MEMORY}"
   printf 'CHECKPOINT_INTERVAL=%q\n' "${CHECKPOINT_INTERVAL}"
@@ -114,6 +120,11 @@ for required_dir in \
   fi
 done
 
+if [[ -n "${WARM_START_CHECKPOINT:-}" && ! -f "${WARM_START_CHECKPOINT}" ]]; then
+  echo "[ERROR] Warm-start checkpoint not found: ${WARM_START_CHECKPOINT}" >&2
+  exit 3
+fi
+
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "[ERROR] nvidia-smi is unavailable. This experiment requires a CUDA GPU." >&2
   exit 4
@@ -135,9 +146,19 @@ nvidia-smi -q > "${EXP_DIR}/gpu_environment.txt"
 echo "[Result filesystem]"
 df -h "${RESULT_ROOT}"
 
-# shellcheck disable=SC2086  # ATTENTION_CASCADES is a space-separated int list
 if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
   echo "[INFO] Running a one-slice forward/backward smoke test (peak VRAM check)."
+  # shellcheck disable=SC2206
+  SMOKE_ATTENTION_CASCADES=(${ATTENTION_CASCADES})
+  SMOKE_EXTRA_ARGS=()
+  if [[ "${ACC_FILM:-0}" == "1" ]]; then
+    SMOKE_EXTRA_ARGS+=(--acc-film)
+  fi
+  if [[ -n "${SPLIT_ATTENTION_CASCADES:-}" ]]; then
+    # shellcheck disable=SC2206
+    SMOKE_SPLIT_CASCADES=(${SPLIT_ATTENTION_CASCADES})
+    SMOKE_EXTRA_ARGS+=(--split-attention-cascades "${SMOKE_SPLIT_CASCADES[@]}")
+  fi
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/smoke_test_training.py \
     --data-root "${DATA_ROOT}" \
     --gpu-num "${TORCH_GPU_NUM}" \
@@ -148,9 +169,10 @@ if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
     --sens-chans "${SENS_CHANS}" \
     --pools "${POOLS}" \
     --sens-pools "${SENS_POOLS}" \
-    --attention-cascades ${ATTENTION_CASCADES} \
+    --attention-cascades "${SMOKE_ATTENTION_CASCADES[@]}" \
     --kspace-mult-factor "${KSPACE_MULT_FACTOR}" \
-    --bbox-loss-weight "${BBOX_LOSS_WEIGHT}"
+    --bbox-loss-weight "${BBOX_LOSS_WEIGHT}" \
+    "${SMOKE_EXTRA_ARGS[@]}"
 fi
 
 if [[ ! -s "${GPU_LOG}" ]]; then
@@ -164,7 +186,8 @@ nvidia-smi \
 GPU_MONITOR_PID=$!
 echo "GPU monitor PID: ${GPU_MONITOR_PID}"
 
-# shellcheck disable=SC2086
+# shellcheck disable=SC2206
+TRAIN_ATTENTION_CASCADES=(${ATTENTION_CASCADES})
 TRAIN_ARGS=(
   python -u train.py
   -g "${TORCH_GPU_NUM}"
@@ -183,7 +206,7 @@ TRAIN_ARGS=(
   --sens_chans "${SENS_CHANS}"
   --pools "${POOLS}"
   --sens-pools "${SENS_POOLS}"
-  --attention-cascades ${ATTENTION_CASCADES}
+  --attention-cascades "${TRAIN_ATTENTION_CASCADES[@]}"
   --kspace-mult-factor "${KSPACE_MULT_FACTOR}"
   --bbox-loss-weight "${BBOX_LOSS_WEIGHT}"
   --seed "${SEED}"
@@ -196,6 +219,26 @@ if [[ "${PIN_MEMORY}" == "1" ]]; then
 fi
 if [[ "${ACC_FILM:-0}" == "1" ]]; then
   TRAIN_ARGS+=(--acc-film)
+fi
+if [[ -n "${SPLIT_ATTENTION_CASCADES:-}" ]]; then
+  # shellcheck disable=SC2206
+  TRAIN_SPLIT_CASCADES=(${SPLIT_ATTENTION_CASCADES})
+  TRAIN_ARGS+=(--split-attention-cascades "${TRAIN_SPLIT_CASCADES[@]}")
+fi
+if [[ -n "${WARM_START_CHECKPOINT:-}" ]]; then
+  TRAIN_ARGS+=(--warm-start-checkpoint "${WARM_START_CHECKPOINT}")
+fi
+if [[ -n "${EXPECTED_WARM_START_EPOCH:-}" ]]; then
+  TRAIN_ARGS+=(--expected-warm-start-epoch "${EXPECTED_WARM_START_EPOCH}")
+fi
+if [[ -n "${ADDITIONAL_EPOCHS:-}" ]]; then
+  TRAIN_ARGS+=(--additional-epochs "${ADDITIONAL_EPOCHS}")
+fi
+if [[ "${BALANCE_ACCELERATIONS:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(
+    --balance-accelerations
+    --acceleration-balance-mode "${ACCELERATION_BALANCE_MODE:-oversample}"
+  )
 fi
 
 echo "Training command: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} ${TRAIN_ARGS[*]}"

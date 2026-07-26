@@ -17,6 +17,7 @@ Differences from the reference, driven by this repository's constraints:
 - Batch size 1 is assumed (AttentionPE block reshape and NormStats).
 """
 
+import copy
 import math
 from typing import List, NamedTuple, Optional, Tuple
 
@@ -237,12 +238,22 @@ class AttentionFeatureVarNetBlock(nn.Module):
         attention_layer: Optional[AttentionPE] = None,
         use_extra_feature_conv: bool = False,
         use_acc_film: bool = False,
+        split_attention: bool = False,
     ):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.feature_processor = feature_processor
         self.attention_layer = attention_layer
+        if split_attention and attention_layer is None:
+            raise ValueError("split_attention requires an attention layer.")
+        # Keep the original ``attention_layer`` key as the acc4 expert so an
+        # unsplit checkpoint remains a strict subset of the split state dict.
+        # The warm-start loader copies both weights and Adam moments from this
+        # module into the acc8 expert.
+        self.attention_layer_acc8 = (
+            copy.deepcopy(attention_layer) if split_attention else None
+        )
         self.use_image_conv = use_extra_feature_conv
         self.dc_weight = nn.Parameter(torch.ones(1))
 
@@ -297,6 +308,11 @@ class AttentionFeatureVarNetBlock(nn.Module):
         )
         return self.dc_weight * self.encode_from_kspace(dc_residual, feature_image)
 
+    def _attention_for_acceleration(self, accel: int) -> Optional[AttentionPE]:
+        if self.attention_layer_acc8 is not None and accel >= 6:
+            return self.attention_layer_acc8
+        return self.attention_layer
+
     def forward(self, feature_image: FeatureImage, accel: int) -> FeatureImage:
         feature_image = feature_image._replace(
             features=self.input_norm(feature_image.features)
@@ -304,9 +320,10 @@ class AttentionFeatureVarNetBlock(nn.Module):
 
         new_features = feature_image.features - self.compute_dc_term(feature_image)
 
-        if self.attention_layer is not None:
+        attention_layer = self._attention_for_acceleration(accel)
+        if attention_layer is not None:
             feature_image = feature_image._replace(
-                features=self.attention_layer(feature_image.features, accel)
+                features=attention_layer(feature_image.features, accel)
             )
 
         regularization = self.feature_processor(feature_image.features)
@@ -342,12 +359,25 @@ class FIVarNet(nn.Module):
         kspace_mult_factor: float = 1e6,
         use_checkpoint: bool = True,
         use_acc_film: bool = False,
+        split_attention_cascades: Optional[List[int]] = None,
     ):
         super().__init__()
         if image_conv_cascades is None:
             image_conv_cascades = [i for i in range(num_cascades) if i % 3 == 0]
         if attention_cascades is None:
             attention_cascades = [0]
+        if split_attention_cascades is None:
+            split_attention_cascades = []
+        split_attention_cascades = sorted(set(split_attention_cascades))
+        invalid_split = [
+            i for i in split_attention_cascades
+            if i < 0 or i >= num_cascades or i not in attention_cascades
+        ]
+        if invalid_split:
+            raise ValueError(
+                "Every split-attention cascade must be a valid attention cascade; "
+                f"invalid indices: {invalid_split}"
+            )
 
         self.acceleration = acceleration  # fallback when mask stride detection fails
         self.kspace_mult_factor = kspace_mult_factor
@@ -370,6 +400,7 @@ class FIVarNet(nn.Module):
                     attention_layer=AttentionPE(chans) if i in attention_cascades else None,
                     use_extra_feature_conv=(i in image_conv_cascades),
                     use_acc_film=use_acc_film,
+                    split_attention=(i in split_attention_cascades),
                 )
                 for i in range(num_cascades)
             ]
