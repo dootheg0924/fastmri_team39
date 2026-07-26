@@ -236,6 +236,7 @@ class AttentionFeatureVarNetBlock(nn.Module):
         feature_processor: nn.Module,
         attention_layer: Optional[AttentionPE] = None,
         use_extra_feature_conv: bool = False,
+        use_acc_film: bool = False,
     ):
         super().__init__()
         self.encoder = encoder
@@ -247,6 +248,17 @@ class AttentionFeatureVarNetBlock(nn.Module):
 
         feature_chans = encoder.feature_chans
         self.input_norm = nn.InstanceNorm2d(feature_chans)
+
+        if use_acc_film:
+            # Acceleration-conditioned FiLM on the regularizer output: row 0 =
+            # acc4, row 1 = acc8, each row stores [gamma_hat | beta] per feature
+            # channel with gamma = 1 + gamma_hat. Zero init makes the block
+            # exactly equal to the unconditioned block, so a non-FiLM
+            # checkpoint can warm-start via load_state_dict(strict=False).
+            self.acc_film = nn.Embedding(2, 2 * feature_chans)
+            nn.init.zeros_(self.acc_film.weight)
+        else:
+            self.acc_film = None
 
         if use_extra_feature_conv:
             self.output_norm = nn.InstanceNorm2d(feature_chans)
@@ -271,6 +283,13 @@ class AttentionFeatureVarNetBlock(nn.Module):
         )
         return sens_expand(image, feature_image.sens_maps)
 
+    def _apply_acc_film(self, features: Tensor, accel: int) -> Tensor:
+        # Bucket boundary 6: stride detection yields 4 or 8 in this challenge;
+        # anything ambiguous falls into the nearer bucket.
+        row = self.acc_film.weight[1 if accel >= 6 else 0]
+        gamma_hat, beta = row.chunk(2)
+        return features * (1.0 + gamma_hat.view(1, -1, 1, 1)) + beta.view(1, -1, 1, 1)
+
     def compute_dc_term(self, feature_image: FeatureImage) -> Tensor:
         est_kspace = self.decode_to_kspace(feature_image)
         dc_residual = torch.where(
@@ -290,7 +309,10 @@ class AttentionFeatureVarNetBlock(nn.Module):
                 features=self.attention_layer(feature_image.features, accel)
             )
 
-        new_features = new_features - self.feature_processor(feature_image.features)
+        regularization = self.feature_processor(feature_image.features)
+        if self.acc_film is not None:
+            regularization = self._apply_acc_film(regularization, accel)
+        new_features = new_features - regularization
 
         if self.use_image_conv:
             new_features = self.output_norm(new_features)
@@ -319,6 +341,7 @@ class FIVarNet(nn.Module):
         image_conv_cascades: Optional[List[int]] = None,
         kspace_mult_factor: float = 1e6,
         use_checkpoint: bool = True,
+        use_acc_film: bool = False,
     ):
         super().__init__()
         if image_conv_cascades is None:
@@ -346,6 +369,7 @@ class FIVarNet(nn.Module):
                     ),
                     attention_layer=AttentionPE(chans) if i in attention_cascades else None,
                     use_extra_feature_conv=(i in image_conv_cascades),
+                    use_acc_film=use_acc_film,
                 )
                 for i in range(num_cascades)
             ]

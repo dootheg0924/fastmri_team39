@@ -127,3 +127,59 @@ class BboxAwareSSIMLoss(nn.Module):
             if terms:
                 loss = loss + self.bbox_weight * torch.stack(terms).mean()
         return loss
+
+    # --- Evaluation scores (not losses), for leaderboard-aligned validation. ---
+    # These reuse the exact same math as the training loss above, but return
+    # SSIM *scores* per slice / per box so validate() can reproduce the
+    # leaderboard aggregation in metrics.py / recon_eval.py without a cv2
+    # dependency (foreground_mask here is the verified torch port).
+    @torch.no_grad()
+    def foreground_ssim_score(self, output, target, maximum):
+        """Per-slice foreground SSIM scores, matching metrics.ssim_full.
+
+        output/target: (B, H, W). Returns a list of length B; an entry is None
+        where the foreground mask is empty (the leaderboard skips that slice).
+        """
+        maximum = maximum.to(dtype=output.dtype)
+        data_range = maximum[:, None, None, None]
+        fg = foreground_mask(target)
+        S = self._ssim_map(output.unsqueeze(1) * fg, target.unsqueeze(1) * fg, data_range)
+        pad = self.win_size // 2
+        fg_valid = fg[..., pad: fg.shape[-2] - pad, pad: fg.shape[-1] - pad]
+        scores = []
+        for b in range(output.shape[0]):
+            denom = fg_valid[b].sum()
+            scores.append(
+                ((S[b] * fg_valid[b]).sum() / denom).item() if denom > 0 else None
+            )
+        return scores
+
+    @torch.no_grad()
+    def bbox_ssim_scores(self, output, target, maximum, boxes):
+        """Per-slice lists of per-box SSIM scores, matching metrics.ssim_bbox.
+
+        Returns a list of length B, each a list of box scores (boxes smaller
+        than the SSIM window are skipped, exactly as the leaderboard).
+        """
+        maximum = maximum.to(dtype=output.dtype)
+        per_sample = [[] for _ in range(output.shape[0])]
+        if boxes is None:
+            return per_sample
+        if boxes.dim() == 2:
+            boxes = boxes.unsqueeze(0)
+        height, width = target.shape[-2], target.shape[-1]
+        for b in range(min(output.shape[0], boxes.shape[0])):
+            for box in boxes[b]:
+                x, y, w, h = (int(v) for v in box.tolist())
+                x0, y0 = max(0, x), max(0, y)
+                x1 = min(width, x + w)
+                y1 = min(height, y + h)
+                if (x1 - x0) < self.win_size or (y1 - y0) < self.win_size:
+                    continue
+                loss = self.bbox_ssim(
+                    output[b: b + 1, y0:y1, x0:x1],
+                    target[b: b + 1, y0:y1, x0:x1],
+                    maximum[b: b + 1],
+                )
+                per_sample[b].append((1.0 - loss).item())
+        return per_sample

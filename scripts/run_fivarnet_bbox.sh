@@ -51,6 +51,7 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'ATTENTION_CASCADES=%q\n' "${ATTENTION_CASCADES}"
   printf 'KSPACE_MULT_FACTOR=%q\n' "${KSPACE_MULT_FACTOR}"
   printf 'BBOX_LOSS_WEIGHT=%q\n' "${BBOX_LOSS_WEIGHT}"
+  printf 'ACC_FILM=%q\n' "${ACC_FILM:-0}"
   printf 'NUM_WORKERS=%q\n' "${NUM_WORKERS}"
   printf 'PIN_MEMORY=%q\n' "${PIN_MEMORY}"
   printf 'CHECKPOINT_INTERVAL=%q\n' "${CHECKPOINT_INTERVAL}"
@@ -192,6 +193,9 @@ TRAIN_ARGS=(
 )
 if [[ "${PIN_MEMORY}" == "1" ]]; then
   TRAIN_ARGS+=(--pin-memory)
+fi
+if [[ "${ACC_FILM:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--acc-film)
 fi
 
 echo "Training command: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} ${TRAIN_ARGS[*]}"

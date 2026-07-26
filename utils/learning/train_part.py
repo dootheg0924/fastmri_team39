@@ -14,15 +14,16 @@ from datetime import datetime, timezone
 
 from collections import defaultdict
 from utils.data.load_data import create_data_loaders
-from utils.common.utils import save_reconstructions, ssim_loss
+from utils.common.utils import save_reconstructions
 from utils.common.bbox_loss import BboxAwareSSIMLoss
 from utils.model.varnet import VarNet
 
 import os
 
 HISTORY_FIELDS = [
-    'epoch', 'train_loss', 'val_loss', 'train_time_sec', 'val_time_sec',
-    'learning_rate', 'is_best',
+    'epoch', 'train_loss', 'val_loss', 'ssim_full', 'ssim_bbox', 'final_score',
+    'full_acc4', 'full_acc8', 'bbox_acc4', 'bbox_acc8',
+    'train_time_sec', 'val_time_sec', 'learning_rate', 'is_best',
 ]
 
 
@@ -50,6 +51,7 @@ def build_model(args):
             attention_cascades=getattr(args, 'attention_cascades', None),
             kspace_mult_factor=getattr(args, 'kspace_mult_factor', 1e6),
             use_checkpoint=not getattr(args, 'no_grad_checkpoint', False),
+            use_acc_film=getattr(args, 'acc_film', False),
         )
     raise ValueError(f'Unknown model name: {model_name}')
 
@@ -87,20 +89,49 @@ def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
     return total_loss, time.perf_counter() - start_epoch
 
 
-def validate(args, model, data_loader, device):
+def _acc_bucket(fname):
+    """Route a volume filename to its acceleration bucket (leaderboard uses two
+    directories, acc4 / acc8; validation volumes carry the tag in the name)."""
+    return 'acc8' if 'acc8' in fname else 'acc4'
+
+
+def validate(args, model, val_metric, data_loader, device):
+    """Score the validation set with the exact competition metric.
+
+    Reproduces recon_eval.py / metrics.py aggregation without cv2: per-slice
+    foreground SSIM and per-box bbox SSIM are averaged within each acceleration
+    bucket, then final = 0.5 * (SSIM_full + SSIM_bbox) with
+    SSIM_full = (full_acc4 + full_acc8) / 2 and likewise for bbox. The returned
+    ``val_loss`` is ``1 - final`` so that "lower is better" still holds.
+    """
     model.eval()
     reconstructions = defaultdict(dict)
     targets = defaultdict(dict)
+    agg = {acc: {'full_total': 0.0, 'full_idx': 0, 'bbox_total': 0.0, 'bbox_idx': 0}
+           for acc in ('acc4', 'acc8')}
     start = time.perf_counter()
 
     with torch.no_grad():
         for iter, data in enumerate(data_loader):
-            mask, kspace, target, _, fnames, slices, _ = data
+            mask, kspace, target, maximum, fnames, slices, boxes = data
             kspace = kspace.to(device=device, non_blocking=True)
             mask = mask.to(device=device, non_blocking=True)
+            maximum = maximum.to(device=device, non_blocking=True)
             output = model(kspace, mask)
+            target_dev = target.to(device=device, non_blocking=True)
+
+            full_scores = val_metric.foreground_ssim_score(output, target_dev, maximum)
+            box_scores = val_metric.bbox_ssim_scores(output, target_dev, maximum, boxes)
 
             for i in range(output.shape[0]):
+                bucket = agg[_acc_bucket(fnames[i])]
+                if full_scores[i] is not None:
+                    bucket['full_total'] += full_scores[i]
+                    bucket['full_idx'] += 1
+                for score in box_scores[i]:
+                    bucket['bbox_total'] += score
+                    bucket['bbox_idx'] += 1
+
                 reconstructions[fnames[i]][int(slices[i])] = output[i].cpu().numpy()
                 targets[fnames[i]][int(slices[i])] = target[i].numpy()
 
@@ -112,9 +143,30 @@ def validate(args, model, data_loader, device):
         targets[fname] = np.stack(
             [out for _, out in sorted(targets[fname].items())]
         )
-    metric_loss = sum([ssim_loss(targets[fname], reconstructions[fname]) for fname in reconstructions])
-    num_subjects = len(reconstructions)
-    return metric_loss, num_subjects, reconstructions, targets, None, time.perf_counter() - start
+
+    def _mean(total, idx):
+        return total / idx if idx > 0 else 0.0
+
+    full4 = _mean(agg['acc4']['full_total'], agg['acc4']['full_idx'])
+    full8 = _mean(agg['acc8']['full_total'], agg['acc8']['full_idx'])
+    bbox4 = _mean(agg['acc4']['bbox_total'], agg['acc4']['bbox_idx'])
+    bbox8 = _mean(agg['acc8']['bbox_total'], agg['acc8']['bbox_idx'])
+    ssim_full = (full4 + full8) / 2
+    ssim_bbox = (bbox4 + bbox8) / 2
+    final_score = 0.5 * ssim_full + 0.5 * ssim_bbox
+
+    result = {
+        'val_loss': 1.0 - final_score,
+        'final_score': final_score,
+        'ssim_full': ssim_full,
+        'ssim_bbox': ssim_bbox,
+        'full_acc4': full4,
+        'full_acc8': full8,
+        'bbox_acc4': bbox4,
+        'bbox_acc8': bbox8,
+        'num_subjects': len(reconstructions),
+    }
+    return result, reconstructions, targets, time.perf_counter() - start
 
 
 def capture_rng_state():
@@ -282,12 +334,12 @@ def train(args):
         train_loss, train_time = train_epoch(
             args, epoch, model, train_loader, optimizer, loss_type, device
         )
-        val_loss_sum, num_subjects, reconstructions, targets, inputs, val_time = validate(
-            args, model, val_loader, device
+        val_result, reconstructions, targets, val_time = validate(
+            args, model, loss_type, val_loader, device
         )
-        if num_subjects == 0:
+        if val_result['num_subjects'] == 0:
             raise RuntimeError('Validation loader produced no subjects.')
-        val_loss = float(val_loss_sum / num_subjects)
+        val_loss = float(val_result['val_loss'])
 
         is_new_best = val_loss < best_val_loss
         best_val_loss = min(best_val_loss, val_loss)
@@ -296,6 +348,13 @@ def train(args):
             'epoch': epoch,
             'train_loss': float(train_loss),
             'val_loss': val_loss,
+            'ssim_full': float(val_result['ssim_full']),
+            'ssim_bbox': float(val_result['ssim_bbox']),
+            'final_score': float(val_result['final_score']),
+            'full_acc4': float(val_result['full_acc4']),
+            'full_acc8': float(val_result['full_acc8']),
+            'bbox_acc4': float(val_result['bbox_acc4']),
+            'bbox_acc8': float(val_result['bbox_acc8']),
             'train_time_sec': float(train_time),
             'val_time_sec': float(val_time),
             'learning_rate': float(optimizer.param_groups[0]['lr']),
@@ -311,13 +370,15 @@ def train(args):
         )
         print(
             f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g} '
-            f'ValLoss = {val_loss:.4g} TrainTime = {train_time:.4f}s ValTime = {val_time:.4f}s',
+            f'ValLoss = {val_loss:.4g} (final={val_result["final_score"]:.4f} '
+            f'full={val_result["ssim_full"]:.4f} bbox={val_result["ssim_bbox"]:.4f}) '
+            f'TrainTime = {train_time:.4f}s ValTime = {val_time:.4f}s',
         )
 
         if is_new_best:
             print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@NewRecord@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             start = time.perf_counter()
-            save_reconstructions(reconstructions, args.val_dir, targets=targets, inputs=inputs)
+            save_reconstructions(reconstructions, args.val_dir, targets=targets, inputs=None)
             print(
                 f'ForwardTime = {time.perf_counter() - start:.4f}s',
             )
