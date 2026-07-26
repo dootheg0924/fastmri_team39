@@ -47,6 +47,10 @@ def parse():
                         help='[fivarnet] k-space scaling applied before / undone after the cascades')
     parser.add_argument('--no-grad-checkpoint', action='store_true',
                         help='[fivarnet] Disable gradient checkpointing (uses more VRAM)')
+    parser.add_argument('--acc-film', action='store_true',
+                        help='[fivarnet] Acceleration-conditioned FiLM (per-acc4/acc8 channel-wise '
+                             'gamma/beta on each feature cascade). Identity at init, so enabling it '
+                             'does not change the model until training moves the parameters')
     parser.add_argument('--bbox-loss-weight', type=float, default=1.0,
                         help='Weight of the annotation-box SSIM loss term; 0 = pure foreground SSIM loss')
     parser.add_argument('--input-key', type=str, default='kspace', help='Name of input key')

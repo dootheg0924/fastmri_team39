@@ -51,6 +51,7 @@ def build_model(args):
             attention_cascades=getattr(args, 'attention_cascades', None),
             kspace_mult_factor=getattr(args, 'kspace_mult_factor', 1e6),
             use_checkpoint=not getattr(args, 'no_grad_checkpoint', False),
+            use_acc_film=getattr(args, 'acc_film', False),
         )
     raise ValueError(f'Unknown model name: {model_name}')
 
