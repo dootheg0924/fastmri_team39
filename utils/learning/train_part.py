@@ -211,7 +211,7 @@ def resolve_time_budget_epochs(
     if budget_hours is None:
         return None
     reserve = float(
-        getattr(args, 'training_time_reserve_fraction', 0.15)
+        getattr(args, 'training_time_reserve_fraction', 0.05)
     )
     if budget_hours <= 0:
         raise ValueError('--training-time-budget-hours must be positive.')
@@ -951,7 +951,7 @@ def train(args):
     args.requested_num_epochs = int(args.num_epochs)
     budget_hours = getattr(args, 'training_time_budget_hours', None)
     reserve_fraction = float(
-        getattr(args, 'training_time_reserve_fraction', 0.15)
+        getattr(args, 'training_time_reserve_fraction', 0.05)
     )
     probe_epochs = int(
         getattr(args, 'training_time_probe_epochs', 2)

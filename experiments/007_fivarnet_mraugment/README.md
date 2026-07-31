@@ -17,9 +17,9 @@ loader size and achievable epoch target are known, the optimizer-step horizon
 is calculated and the original relative phases are mapped onto it: 3.57%
 warm-up, plateau until 71.43%, then quarter-cosine decay.
 
-Set `TRAINING_TIME_BUDGET_HOURS` to the actual GPU allocation. The first two
-full epochs measure real FI-VarNet+MRAugment throughput (the second includes a
-non-zero augmentation probability). The code reserves 15% of the budget,
+`TRAINING_TIME_BUDGET_HOURS` is set to the 480-hour GPU allocation. The first
+two full epochs measure real FI-VarNet+MRAugment throughput (the second
+includes a non-zero augmentation probability). The code reserves 5%,
 resolves the number of complete epochs that fit, and immediately retunes both
 LR and augmentation schedules. The result is recorded in
 `resolved_training_time_budget.json`. If the variable is empty, all 100 epochs
@@ -83,8 +83,12 @@ Run with:
 bash scripts/run_fivarnet_mraugment.sh
 ```
 
-The only required runtime decision is the GPU allocation window:
+The checked-in final setting uses the full 20-day allocation:
 
 ```bash
-TRAINING_TIME_BUDGET_HOURS=48 bash scripts/run_fivarnet_mraugment.sh
+bash scripts/run_fivarnet_mraugment.sh
 ```
+
+This resolves from a 480-hour budget, using up to 456 hours for training and
+reserving 24 hours for runtime variation, final checkpointing, and
+leaderboard reconstruction.

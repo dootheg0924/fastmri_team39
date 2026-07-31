@@ -256,7 +256,7 @@ def parse():
     parser.add_argument(
         '--training-time-reserve-fraction',
         type=float,
-        default=0.15,
+        default=0.05,
         help='Fraction of the time budget reserved for startup/checkpoints/reconstruction',
     )
     parser.add_argument(

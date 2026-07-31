@@ -100,7 +100,7 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'MRAUGMENT_SEED=%q\n' "${MRAUGMENT_SEED:-42}"
   printf 'MRAUGMENT_MIN_BBOX_SIZE=%q\n' "${MRAUGMENT_MIN_BBOX_SIZE:-7}"
   printf 'TRAINING_TIME_BUDGET_HOURS=%q\n' "${TRAINING_TIME_BUDGET_HOURS:-}"
-  printf 'TRAINING_TIME_RESERVE_FRACTION=%q\n' "${TRAINING_TIME_RESERVE_FRACTION:-0.15}"
+  printf 'TRAINING_TIME_RESERVE_FRACTION=%q\n' "${TRAINING_TIME_RESERVE_FRACTION:-0.05}"
   printf 'TRAINING_TIME_PROBE_EPOCHS=%q\n' "${TRAINING_TIME_PROBE_EPOCHS:-2}"
   printf 'BBOX_LOSS_WEIGHT=%q\n' "${BBOX_LOSS_WEIGHT}"
   printf 'ACC_FILM=%q\n' "${ACC_FILM:-0}"
@@ -286,7 +286,7 @@ fi
 if [[ -n "${TRAINING_TIME_BUDGET_HOURS:-}" ]]; then
   TRAIN_ARGS+=(
     --training-time-budget-hours "${TRAINING_TIME_BUDGET_HOURS}"
-    --training-time-reserve-fraction "${TRAINING_TIME_RESERVE_FRACTION:-0.15}"
+    --training-time-reserve-fraction "${TRAINING_TIME_RESERVE_FRACTION:-0.05}"
     --training-time-probe-epochs "${TRAINING_TIME_PROBE_EPOCHS:-2}"
   )
 fi
