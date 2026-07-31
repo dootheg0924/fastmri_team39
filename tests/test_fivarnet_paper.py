@@ -25,6 +25,7 @@ from utils.learning.train_part import (
     configure_epoch_lr_schedule,
     load_checkpoint,
     paper_lr_multiplier,
+    resolve_time_budget_epochs,
     save_model,
     training_limit_reached,
     train_epoch,
@@ -100,7 +101,7 @@ def test_paper_preset_preserves_explicit_data_split_protocol():
     assert args.checkpoint_metric == "paper-ssim"
 
 
-def test_final_preset_uses_epochs_and_best_challenge_checkpoint():
+def test_final_preset_uses_epochs_and_latest_submission_checkpoint():
     args = apply_training_preset(
         Namespace(
             training_preset=FINAL_FIVARNET_PRESET,
@@ -112,7 +113,7 @@ def test_final_preset_uses_epochs_and_best_challenge_checkpoint():
 
     assert args.max_steps is None
     assert args.lr_scheduler == "fi-varnet-epochs"
-    assert args.checkpoint_metric == "challenge-final"
+    assert args.checkpoint_metric == "submission-latest"
     assert args.num_epochs == 100
     assert args.model_name == "fivarnet"
     assert args.cascade == args.image_cascades == 6
@@ -135,6 +136,42 @@ def test_epoch_lr_schedule_preserves_paper_phase_ratios():
         10_000 * 150_000 / 210_000
     )
     assert args.lr_total_steps == 10_000
+
+
+def test_time_budget_resolves_epoch_and_both_schedules():
+    args = Namespace(
+        lr_scheduler="fi-varnet-epochs",
+        gradient_accumulation_steps=4,
+        num_epochs=100,
+        requested_num_epochs=100,
+        training_time_budget_hours=10,
+        training_time_reserve_fraction=0.15,
+        mraugment=True,
+    )
+    resolved = resolve_time_budget_epochs(
+        args,
+        launch_start_epoch=0,
+        measured_epoch_seconds=1800,
+        loader_length=400,
+    )
+
+    assert resolved["affordable_epochs_this_launch"] == 17
+    assert resolved["resolved_target_epoch"] == 17
+    assert args.num_epochs == 17
+    assert args.mraugment_total_epochs == 17
+    assert args.lr_total_steps == 1700
+
+
+def test_submission_latest_always_promotes_completed_epoch():
+    args = Namespace(checkpoint_metric="submission-latest")
+    best, promote = checkpoint_decision(
+        args,
+        val_loss=float("nan"),
+        best_val_loss=float("inf"),
+        global_step=123,
+    )
+    assert math.isnan(best)
+    assert promote is True
 
 
 def test_exp003_bbox_objective_uses_requested_half_weight(monkeypatch):

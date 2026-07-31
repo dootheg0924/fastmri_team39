@@ -99,7 +99,7 @@ def apply_training_preset(args):
     # evaluates every epoch and promotes the best challenge score.
     if getattr(args, 'checkpoint_metric', None) is None:
         overrides['checkpoint_metric'] = (
-            'challenge-final'
+            'submission-latest'
             if args.training_preset == FINAL_FIVARNET_PRESET
             else 'paper-final'
         )
@@ -247,6 +247,24 @@ def parse():
         default=None,
         help='Optional hard epoch cap even when --max-steps is active',
     )
+    parser.add_argument(
+        '--training-time-budget-hours',
+        type=float,
+        default=None,
+        help='Resolve a safe epoch target from the first measured epoch time',
+    )
+    parser.add_argument(
+        '--training-time-reserve-fraction',
+        type=float,
+        default=0.15,
+        help='Fraction of the time budget reserved for startup/checkpoints/reconstruction',
+    )
+    parser.add_argument(
+        '--training-time-probe-epochs',
+        type=int,
+        default=2,
+        help='Completed epochs averaged before resolving the time budget',
+    )
     parser.add_argument('--lr-warmup-steps', type=int, default=7500)
     parser.add_argument('--lr-cosine-start-step', type=int, default=150000)
     parser.add_argument('--lr-min-factor', type=float, default=1e-8,
@@ -261,10 +279,16 @@ def parse():
     )
     parser.add_argument(
         '--checkpoint-metric',
-        choices=['challenge-final', 'paper-ssim', 'paper-final'],
+        choices=[
+            'challenge-final',
+            'paper-ssim',
+            'paper-final',
+            'submission-latest',
+        ],
         default=None,
         help='Checkpoint protocol. Defaults to challenge-final for legacy '
-             'training and paper-final for the FI-VarNet paper preset',
+             'training; submission-latest skips validation and keeps the '
+             'latest completed epoch submission-ready',
     )
     
     parser.add_argument('--cascade', type=int, default=1, help='Number of cascades | Should be less than 12') ## important hyperparameter

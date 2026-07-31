@@ -139,16 +139,22 @@ def build_lr_scheduler(args, optimizer):
     if scheduler_name not in {'fi-varnet-paper', 'fi-varnet-epochs'}:
         raise ValueError(f'Unknown LR scheduler: {scheduler_name}')
 
-    if scheduler_name == 'fi-varnet-epochs':
-        schedule_steps = getattr(args, 'lr_total_steps', None)
-    else:
-        schedule_steps = getattr(args, 'max_steps', None)
-    if schedule_steps is None:
+    initial_schedule_steps = (
+        getattr(args, 'lr_total_steps', None)
+        if scheduler_name == 'fi-varnet-epochs'
+        else getattr(args, 'max_steps', None)
+    )
+    if initial_schedule_steps is None:
         raise ValueError(
             f'{scheduler_name} requires its total optimizer-step horizon.'
         )
 
     def step_fn(step):
+        schedule_steps = (
+            getattr(args, 'lr_total_steps')
+            if scheduler_name == 'fi-varnet-epochs'
+            else initial_schedule_steps
+        )
         return paper_lr_multiplier(
             step,
             base_lr=args.lr,
@@ -190,6 +196,55 @@ def configure_epoch_lr_schedule(args, loader_length):
         'total_steps': total_steps,
         'warmup_steps': args.lr_warmup_steps,
         'cosine_start_step': args.lr_cosine_start_step,
+    }
+
+
+def resolve_time_budget_epochs(
+    args,
+    *,
+    launch_start_epoch,
+    measured_epoch_seconds,
+    loader_length,
+):
+    """Resolve a submission run's target from measured real epoch time."""
+    budget_hours = getattr(args, 'training_time_budget_hours', None)
+    if budget_hours is None:
+        return None
+    reserve = float(
+        getattr(args, 'training_time_reserve_fraction', 0.15)
+    )
+    if budget_hours <= 0:
+        raise ValueError('--training-time-budget-hours must be positive.')
+    if not 0 <= reserve < 1:
+        raise ValueError(
+            '--training-time-reserve-fraction must be in [0, 1).'
+        )
+    if measured_epoch_seconds <= 0:
+        raise ValueError('Measured epoch time must be positive.')
+
+    safe_seconds = float(budget_hours) * 3600.0 * (1.0 - reserve)
+    affordable_epochs = max(1, int(safe_seconds // measured_epoch_seconds))
+    requested_target = int(
+        getattr(args, 'requested_num_epochs', args.num_epochs)
+    )
+    resolved_target = min(
+        requested_target,
+        int(launch_start_epoch) + affordable_epochs,
+    )
+    args.num_epochs = max(int(launch_start_epoch) + 1, resolved_target)
+    schedule = configure_epoch_lr_schedule(args, loader_length)
+    if getattr(args, 'mraugment', False):
+        args.mraugment_total_epochs = int(args.num_epochs)
+    return {
+        'budget_hours': float(budget_hours),
+        'reserve_fraction': reserve,
+        'safe_training_seconds': safe_seconds,
+        'measured_epoch_seconds': float(measured_epoch_seconds),
+        'launch_start_epoch': int(launch_start_epoch),
+        'affordable_epochs_this_launch': affordable_epochs,
+        'requested_target_epoch': requested_target,
+        'resolved_target_epoch': int(args.num_epochs),
+        'lr_schedule': schedule,
     }
 
 
@@ -387,7 +442,7 @@ def validate(args, model, val_metric, data_loader, device, paper_loss=None):
     checkpoint_metric = getattr(args, 'checkpoint_metric', 'challenge-final')
     if checkpoint_metric in {'paper-ssim', 'paper-final'}:
         selected_val_loss = paper_val_loss
-    elif checkpoint_metric == 'challenge-final':
+    elif checkpoint_metric in {'challenge-final', 'submission-latest'}:
         selected_val_loss = challenge_val_loss
     else:
         raise ValueError(f'Unknown checkpoint metric: {checkpoint_metric}')
@@ -433,6 +488,8 @@ def checkpoint_decision(
                 args, completed_epochs, global_step
             )
         return (float(val_loss) if is_final else float(best_val_loss), is_final)
+    if checkpoint_metric == 'submission-latest':
+        return float(val_loss), True
 
     is_new_best = float(val_loss) < float(best_val_loss)
     return min(float(best_val_loss), float(val_loss)), is_new_best
@@ -525,14 +582,27 @@ def save_model(
     torch.save(checkpoint, f=tmp_path)
     os.replace(tmp_path, model_path)
     if is_new_best:
-        best_tmp = exp_dir / 'best_model.pt.tmp'
-        shutil.copyfile(model_path, best_tmp)
-        os.replace(best_tmp, exp_dir / 'best_model.pt')
+        _atomic_promote_checkpoint(
+            model_path, exp_dir / 'best_model.pt'
+        )
     if args.checkpoint_interval > 0 and epoch % args.checkpoint_interval == 0:
         snapshot_path = exp_dir / f'checkpoint_epoch_{epoch:04d}.pt'
         snapshot_tmp = snapshot_path.with_suffix('.pt.tmp')
         shutil.copyfile(model_path, snapshot_tmp)
         os.replace(snapshot_tmp, snapshot_path)
+
+
+def _atomic_promote_checkpoint(source_path, destination_path):
+    """Atomically promote a checkpoint, preferring a zero-copy hard link."""
+    source_path = Path(source_path)
+    destination_path = Path(destination_path)
+    tmp_path = destination_path.with_suffix(destination_path.suffix + '.tmp')
+    tmp_path.unlink(missing_ok=True)
+    try:
+        os.link(source_path, tmp_path)
+    except OSError:
+        shutil.copyfile(source_path, tmp_path)
+    os.replace(tmp_path, destination_path)
 
 
 def load_checkpoint(checkpoint_path, model, optimizer, device, scheduler=None):
@@ -878,6 +948,23 @@ def train(args):
             'because FI-VarNet infers one acceleration per batch.'
         )
 
+    args.requested_num_epochs = int(args.num_epochs)
+    budget_hours = getattr(args, 'training_time_budget_hours', None)
+    reserve_fraction = float(
+        getattr(args, 'training_time_reserve_fraction', 0.15)
+    )
+    probe_epochs = int(
+        getattr(args, 'training_time_probe_epochs', 2)
+    )
+    if budget_hours is not None and budget_hours <= 0:
+        raise ValueError('--training-time-budget-hours must be positive.')
+    if not 0 <= reserve_fraction < 1:
+        raise ValueError(
+            '--training-time-reserve-fraction must be in [0, 1).'
+        )
+    if probe_epochs <= 0:
+        raise ValueError('--training-time-probe-epochs must be positive.')
+
     train_paths = [args.data_path_train]
     if getattr(args, 'combine_train_val', False):
         train_paths.append(args.data_path_val)
@@ -890,9 +977,11 @@ def train(args):
         args=args,
         shuffle=True,
     )
-    val_loader = create_data_loaders(
-        data_path=args.data_path_val, args=args
-    )
+    val_loader = None
+    if getattr(args, 'checkpoint_metric', None) != 'submission-latest':
+        val_loader = create_data_loaders(
+            data_path=args.data_path_val, args=args
+        )
     lr_schedule = configure_epoch_lr_schedule(args, len(train_loader))
     if lr_schedule is not None:
         print(
@@ -1069,19 +1158,23 @@ def train(args):
     )
     if training_complete:
         if (
-            getattr(args, 'checkpoint_metric', None) == 'paper-final'
+            getattr(args, 'checkpoint_metric', None)
+            in {'paper-final', 'submission-latest'}
             and checkpoint_path.exists()
         ):
             # A process may have stopped after atomically replacing model.pt
             # but before copying it to the inference filename. Re-promote the
             # completed final checkpoint on resume as an idempotent repair.
-            best_tmp = args.exp_dir / 'best_model.pt.tmp'
-            shutil.copyfile(checkpoint_path, best_tmp)
-            os.replace(best_tmp, args.exp_dir / 'best_model.pt')
+            _atomic_promote_checkpoint(
+                checkpoint_path, args.exp_dir / 'best_model.pt'
+            )
         print(completion_message)
         return
 
     epoch = start_epoch
+    launch_start_epoch = start_epoch
+    launch_training_seconds = 0.0
+    time_budget_resolved = False
     while not training_limit_reached(args, epoch, global_step):
         augmentation_p = 0.0
         if getattr(args, 'mraugment', False):
@@ -1111,16 +1204,86 @@ def train(args):
         )
         global_step += completed_steps
         samples_seen += epoch_samples_seen
+        launch_training_seconds += train_time
+        completed_this_launch = epoch - launch_start_epoch + 1
+
+        if (
+            getattr(args, 'training_time_budget_hours', None) is not None
+            and not time_budget_resolved
+            and (
+                completed_this_launch >= probe_epochs
+                or launch_training_seconds
+                + launch_training_seconds / completed_this_launch
+                > float(args.training_time_budget_hours)
+                * 3600.0
+                * (1.0 - reserve_fraction)
+            )
+        ):
+            average_epoch_seconds = (
+                launch_training_seconds / completed_this_launch
+            )
+            budget_resolution = resolve_time_budget_epochs(
+                args,
+                launch_start_epoch=launch_start_epoch,
+                measured_epoch_seconds=average_epoch_seconds,
+                loader_length=len(train_loader),
+            )
+            time_budget_resolved = True
+            budget_path = (
+                args.val_loss_dir / 'resolved_training_time_budget.json'
+            )
+            budget_tmp = budget_path.with_suffix('.json.tmp')
+            with budget_tmp.open('w', encoding='utf-8') as f:
+                json.dump(
+                    budget_resolution, f, indent=2, ensure_ascii=False
+                )
+            os.replace(budget_tmp, budget_path)
+            print(
+                'Time-budget epoch target resolved: '
+                f'{budget_resolution["resolved_target_epoch"]} '
+                f'({completed_this_launch}-epoch average '
+                f'{average_epoch_seconds:.1f}s, '
+                f'budget {budget_resolution["budget_hours"]:g}h, '
+                f'reserve {budget_resolution["reserve_fraction"]:.0%}).'
+            )
+        elif (
+            getattr(args, 'training_time_budget_hours', None) is not None
+            and time_budget_resolved
+        ):
+            average_epoch_seconds = (
+                launch_training_seconds / completed_this_launch
+            )
+            safe_seconds = (
+                float(args.training_time_budget_hours)
+                * 3600.0
+                * (1.0 - reserve_fraction)
+            )
+            if (
+                epoch + 1 < args.num_epochs
+                and launch_training_seconds + average_epoch_seconds
+                > safe_seconds
+            ):
+                args.num_epochs = epoch + 1
+                configure_epoch_lr_schedule(args, len(train_loader))
+                if getattr(args, 'mraugment', False):
+                    args.mraugment_total_epochs = args.num_epochs
+                print(
+                    'Time-budget safety stop: the next epoch is unlikely to '
+                    f'fit; finalizing completed epoch {epoch + 1}.'
+                )
 
         paper_final_pending_row = False
-        if getattr(args, 'checkpoint_metric', None) == 'paper-final':
-            # The paper explicitly skipped knee validation. Persist every
-            # epoch boundary without inspecting the held-out split. At the
-            # configured step/epoch limit, promote authoritative weights
-            # *before* reporting-only evaluation so a validation failure
-            # cannot lose the final model.
+        checkpoint_metric = getattr(args, 'checkpoint_metric', None)
+        if checkpoint_metric in {'paper-final', 'submission-latest'}:
+            # These protocols do not use validation for checkpoint selection.
+            # Persist every epoch boundary first so an interruption cannot
+            # lose the latest complete submission state.
             reached_final_step = training_limit_reached(
                 args, epoch + 1, global_step
+            )
+            keep_as_submission = (
+                checkpoint_metric == 'submission-latest'
+                or reached_final_step
             )
             nan = float('nan')
             history.append({
@@ -1141,7 +1304,7 @@ def train(args):
                 'learning_rate': float(optimizer.param_groups[0]['lr']),
                 'global_step': int(global_step),
                 'samples_seen': int(samples_seen),
-                'is_best': 0,
+                'is_best': int(keep_as_submission),
             })
             save_training_history(
                 history, args.val_loss_dir / 'training_history.csv'
@@ -1149,10 +1312,21 @@ def train(args):
             save_val_loss_log(history, args.val_loss_dir / 'val_loss_log.npy')
             save_model(
                 args, args.exp_dir, epoch + 1, model, optimizer,
-                best_val_loss, reached_final_step, history,
+                best_val_loss, keep_as_submission, history,
                 scheduler=scheduler, global_step=global_step,
                 samples_seen=samples_seen,
             )
+            if checkpoint_metric == 'submission-latest':
+                print(
+                    f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] '
+                    f'TrainLoss = {train_loss:.4g} '
+                    f'Step = [{global_step}] Samples = {samples_seen} '
+                    'Validation = skipped (all labels used for training); '
+                    'latest completed epoch promoted to best_model.pt '
+                    f'TrainTime = {train_time:.4f}s',
+                )
+                epoch += 1
+                continue
             if not reached_final_step:
                 print(
                     f'Epoch = [{epoch:4d}] TrainLoss = {train_loss:.4g} '
