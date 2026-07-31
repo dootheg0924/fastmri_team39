@@ -90,8 +90,12 @@ def apply_training_preset(args):
         # runtime data-protocol choice: the knee paper uses train only, while
         # the released brain leaderboard runner combines train + validation.
         'data_sampler_seed': 0,
-        'num_workers': 4,
-        'pin_memory': False,
+        'num_workers': (
+            2
+            if args.training_preset == FINAL_FIVARNET_PRESET
+            else 4
+        ),
+        'pin_memory': args.training_preset == FINAL_FIVARNET_PRESET,
         'deterministic': False,
         'float32_matmul_precision': 'high',
     }

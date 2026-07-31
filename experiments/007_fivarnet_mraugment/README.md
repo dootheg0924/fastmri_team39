@@ -92,3 +92,9 @@ bash scripts/run_fivarnet_mraugment.sh
 This resolves from a 480-hour budget, using up to 456 hours for training and
 reserving 24 hours for runtime variation, final checkpointing, and
 leaderboard reconstruction.
+
+The supplied runtime exposes two CPU cores and about 10 GiB of host memory.
+The final loader therefore uses `NUM_WORKERS=2` and `PIN_MEMORY=1`: one worker
+per CPU core, with pinned batches enabling the trainer's non-blocking GPU
+copies. More workers are avoided because prior runs already held the GPU near
+full utilization and host memory reached roughly 8 GiB.

@@ -70,6 +70,8 @@ def test_gtx1080_preset_resolves_requested_values():
     assert args.adam_amsgrad is False
     assert args.loss_name == "bbox-aware-ssim"
     assert args.bbox_loss_weight == pytest.approx(0.5)
+    assert args.num_workers == 4
+    assert args.pin_memory is False
     assert args.checkpoint_metric == "paper-final"
     assert args.lr_scheduler == "fi-varnet-paper"
     assert args.max_steps == 210_000
@@ -119,6 +121,8 @@ def test_final_preset_uses_epochs_and_latest_submission_checkpoint():
     assert args.cascade == args.image_cascades == 6
     assert args.loss_name == "bbox-aware-ssim"
     assert args.bbox_loss_weight == pytest.approx(0.5)
+    assert args.num_workers == 2
+    assert args.pin_memory is True
 
 
 def test_epoch_lr_schedule_preserves_paper_phase_ratios():
