@@ -7,27 +7,20 @@ training profile, not a fixed-step reproduction experiment:
 
 - train and validation labels are both used for training;
 - validation passes are skipped;
-- a separate two-epoch run measures throughput before final training;
-- the final epoch count is fixed before the scratch model is initialized;
+- the LR and augmentation schedules use a fixed 100-epoch horizon;
 - `model.pt` is saved at every epoch boundary for resume;
 - every completed epoch is atomically promoted to `best_model.pt`, so an
   interrupted run always leaves a submission-ready checkpoint.
 
-The FI learning-rate shape is mapped once onto the fixed final horizon: 3.57%
+The FI learning-rate shape is mapped once onto 100 epochs: 3.57%
 warm-up, plateau until 71.43%, then quarter-cosine decay. MRAugment uses the
 same fixed horizon. Neither schedule changes after epoch zero or on resume.
 
-The calibration run has `T=2`: epoch 0 measures the no-geometry path and epoch
-1 reaches `p~=0.51`, close to the final augmentation cost. Its checkpoint is
-discarded. The resolver subtracts calibration wall time from 95% of the
-480-hour allocation, uses the slower of the late-augmentation epoch and
-calibration wall-time-per-epoch, and caps the recommendation at 100 epochs.
-It writes `recommended_final_epochs.env` and a JSON audit record.
-
-The final profile deliberately leaves `TRAINING_TIME_BUDGET_HOURS` empty.
-This prevents timing jitter, a safety stop, or process restart from changing
-the trained model. Final training starts from a new random initialization and
-can resume only with the same fixed horizon.
+The run attempts all 100 epochs, but 100 is an upper bound rather than a
+requirement. If the 20-day allocation ends during epoch 82, for example,
+epoch 81 remains in both `model.pt` and `best_model.pt` and can be submitted.
+The profile leaves `TRAINING_TIME_BUDGET_HOURS` empty so runtime estimates do
+not retune either schedule.
 
 ## Paper-aligned augmentation
 
@@ -52,7 +45,7 @@ The base probability uses the paper's normalized exponential schedule:
 
 `p(t) = 0.55 * (1 - exp(-5 * t/T)) / (1 - exp(-5))`.
 
-For the final run, `T` is the fixed calibration recommendation (at most 100).
+For the final run, `T=100`.
 
 ## Deliberate project-specific decisions
 
@@ -78,41 +71,22 @@ For the final run, `T` is the fixed calibration recommendation (at most 100).
    validation. This final refit uses all 200 labeled volumes. The leaderboard
    data remains completely excluded from training.
 6. There is no validation-based model selection after combining the labels.
-   The latest completed epoch is the submission checkpoint. This is why the
-   LR and MRAugment horizons are resolved to a duration expected to finish.
+   The latest completed epoch is the submission checkpoint, even when the
+   allocation ends before epoch 100.
 
-## Reproducible launch sequence
-
-Run the calibration once from a fresh result directory:
-
-```bash
-bash scripts/run_fivarnet_mraugment_calibration.sh
-```
-
-Do not warm-start from its checkpoint. The final launcher automatically reads
-`${RESULT_ROOT}/calibrate_fivarnet_f6i6_mraugment_all_data/recommended_final_epochs.env`.
-Review the printed fixed epoch count, then start a new scratch experiment:
+## Launch
 
 ```bash
 bash scripts/run_fivarnet_mraugment.sh
 ```
 
-An explicit audited value takes precedence:
-
-```bash
-FINAL_NUM_EPOCHS=<calibrated integer> \
-  bash scripts/run_fivarnet_mraugment.sh
-```
-
-Calibration and final training together may use up to 456 hours. The
-remaining 24 hours are reserved for runtime variation, final checkpointing,
-and leaderboard reconstruction. Before submission, copy the resolved
-`FINAL_NUM_EPOCHS` into the submitted reproduction instructions.
+The first launch should use a fresh final result directory. If training is
+interrupted, running the same command resumes from `model.pt` with the same
+100-epoch schedules. If no time remains, submit `best_model.pt`, which tracks
+the latest fully completed epoch.
 
 The final preset enables deterministic PyTorch algorithms, deterministic
-cuDNN, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, and `PYTHONHASHSEED=42`. The
-calibration uses the same deterministic runtime so its throughput reflects
-the final run.
+cuDNN, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, and `PYTHONHASHSEED=42`.
 
 The supplied runtime exposes two CPU cores and about 10 GiB of host memory.
 The final loader therefore uses `NUM_WORKERS=2` and `PIN_MEMORY=1`: one worker
