@@ -228,6 +228,12 @@ def parse():
     )
     parser.add_argument('--max-steps', type=int, default=None,
                         help='Stop after this many optimizer updates, independent of epochs')
+    parser.add_argument(
+        '--max-training-epochs',
+        type=int,
+        default=None,
+        help='Optional hard epoch cap even when --max-steps is active',
+    )
     parser.add_argument('--lr-warmup-steps', type=int, default=7500)
     parser.add_argument('--lr-cosine-start-step', type=int, default=150000)
     parser.add_argument('--lr-min-factor', type=float, default=1e-8,

@@ -70,6 +70,7 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'TORCH_GPU_NUM=%q\n' "${TORCH_GPU_NUM}"
   printf 'BATCH_SIZE=%q\n' "${BATCH_SIZE}"
   printf 'NUM_EPOCHS=%q\n' "${NUM_EPOCHS}"
+  printf 'MAX_TRAINING_EPOCHS=%q\n' "${MAX_TRAINING_EPOCHS:-}"
   printf 'LEARNING_RATE=%q\n' "${LEARNING_RATE}"
   printf 'REPORT_INTERVAL=%q\n' "${REPORT_INTERVAL}"
   printf 'SEED=%q\n' "${SEED}"
@@ -274,6 +275,9 @@ TRAIN_ARGS=(
   --checkpoint-interval "${CHECKPOINT_INTERVAL}"
   --resume
 )
+if [[ -n "${MAX_TRAINING_EPOCHS:-}" ]]; then
+  TRAIN_ARGS+=(--max-training-epochs "${MAX_TRAINING_EPOCHS}")
+fi
 if [[ "${PIN_MEMORY}" == "1" ]]; then
   TRAIN_ARGS+=(--pin-memory)
 fi

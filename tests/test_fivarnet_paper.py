@@ -21,6 +21,7 @@ from utils.learning.train_part import (
     load_checkpoint,
     paper_lr_multiplier,
     save_model,
+    training_limit_reached,
     train_epoch,
     validate,
 )
@@ -371,6 +372,28 @@ def test_knee_paper_checkpoint_selection_uses_only_final_step():
         global_step=210_000,
     )
     assert best == pytest.approx(0.30)
+    assert promote is True
+
+
+def test_explicit_epoch_cap_finishes_step_based_training():
+    args = Namespace(
+        checkpoint_metric="paper-final",
+        max_steps=210_000,
+        max_training_epochs=100,
+        num_epochs=100,
+    )
+    assert not training_limit_reached(args, 99, 120_000)
+    assert training_limit_reached(args, 100, 120_000)
+    assert training_limit_reached(args, 20, 210_000)
+
+    best, promote = checkpoint_decision(
+        args,
+        val_loss=0.2,
+        best_val_loss=float("inf"),
+        global_step=120_000,
+        completed_epochs=100,
+    )
+    assert best == pytest.approx(0.2)
     assert promote is True
 
 

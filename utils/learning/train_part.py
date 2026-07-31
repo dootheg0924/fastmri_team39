@@ -372,7 +372,13 @@ def validate(args, model, val_metric, data_loader, device, paper_loss=None):
     return result, reconstructions, targets, time.perf_counter() - start
 
 
-def checkpoint_decision(args, val_loss, best_val_loss, global_step):
+def checkpoint_decision(
+    args,
+    val_loss,
+    best_val_loss,
+    global_step,
+    completed_epochs=None,
+):
     """Return updated best loss and whether to promote this checkpoint.
 
     The paper's knee experiment skipped validation, so its authoritative
@@ -385,10 +391,28 @@ def checkpoint_decision(args, val_loss, best_val_loss, global_step):
         if max_steps is None:
             raise ValueError('paper-final checkpointing requires --max-steps.')
         is_final = int(global_step) >= int(max_steps)
+        if completed_epochs is not None:
+            is_final = training_limit_reached(
+                args, completed_epochs, global_step
+            )
         return (float(val_loss) if is_final else float(best_val_loss), is_final)
 
     is_new_best = float(val_loss) < float(best_val_loss)
     return min(float(best_val_loss), float(val_loss)), is_new_best
+
+
+def training_limit_reached(args, completed_epochs, global_step):
+    """Return whether either the configured step or explicit epoch cap is done."""
+    max_steps = getattr(args, 'max_steps', None)
+    max_training_epochs = getattr(args, 'max_training_epochs', None)
+    step_limit = max_steps is not None and int(global_step) >= int(max_steps)
+    epoch_limit = (
+        max_training_epochs is not None
+        and int(completed_epochs) >= int(max_training_epochs)
+    )
+    if max_steps is None and max_training_epochs is None:
+        epoch_limit = int(completed_epochs) >= int(args.num_epochs)
+    return step_limit or epoch_limit
 
 
 def capture_rng_state():
@@ -901,6 +925,11 @@ def train(args):
             if max_steps is not None
             else int(args.num_epochs)
         )
+        max_training_epochs = getattr(args, 'max_training_epochs', None)
+        if max_training_epochs is not None:
+            args.mraugment_total_epochs = min(
+                args.mraugment_total_epochs, int(max_training_epochs)
+            )
         if args.mraugment_total_epochs <= getattr(
             args, 'mraugment_delay_epochs', 0
         ):
@@ -974,21 +1003,20 @@ def train(args):
     max_steps = getattr(args, 'max_steps', None)
     if max_steps is not None and max_steps <= 0:
         raise ValueError('--max-steps must be positive.')
+    max_training_epochs = getattr(args, 'max_training_epochs', None)
+    if max_training_epochs is not None and max_training_epochs <= 0:
+        raise ValueError('--max-training-epochs must be positive.')
     if getattr(args, 'checkpoint_metric', None) == 'paper-final' and max_steps is None:
         raise ValueError('paper-final checkpointing requires --max-steps.')
 
-    if max_steps is not None:
-        training_complete = global_step >= max_steps
-        completion_message = (
-            f'Checkpoint already reached step {global_step}; '
-            f'requested steps: {max_steps}.'
-        )
-    else:
-        training_complete = start_epoch >= args.num_epochs
-        completion_message = (
-            f'Checkpoint already reached epoch {start_epoch}; '
-            f'requested epochs: {args.num_epochs}.'
-        )
+    training_complete = training_limit_reached(
+        args, start_epoch, global_step
+    )
+    completion_message = (
+        f'Checkpoint already reached epoch {start_epoch}, step {global_step}; '
+        f'limits: epochs={max_training_epochs or args.num_epochs}, '
+        f'steps={max_steps or "-"}.'
+    )
     if training_complete:
         if (
             getattr(args, 'checkpoint_metric', None) == 'paper-final'
@@ -1004,10 +1032,7 @@ def train(args):
         return
 
     epoch = start_epoch
-    while (
-        (max_steps is None and epoch < args.num_epochs)
-        or (max_steps is not None and global_step < max_steps)
-    ):
+    while not training_limit_reached(args, epoch, global_step):
         augmentation_p = 0.0
         if getattr(args, 'mraugment', False):
             augmentation_p = augmentation_probability(
@@ -1040,10 +1065,13 @@ def train(args):
         paper_final_pending_row = False
         if getattr(args, 'checkpoint_metric', None) == 'paper-final':
             # The paper explicitly skipped knee validation. Persist every
-            # epoch boundary without inspecting the held-out split. At 210k,
-            # promote the authoritative weights *before* the reporting-only
-            # evaluation so a validation failure cannot lose the final model.
-            reached_final_step = global_step >= max_steps
+            # epoch boundary without inspecting the held-out split. At the
+            # configured step/epoch limit, promote authoritative weights
+            # *before* reporting-only evaluation so a validation failure
+            # cannot lose the final model.
+            reached_final_step = training_limit_reached(
+                args, epoch + 1, global_step
+            )
             nan = float('nan')
             history.append({
                 'epoch': epoch,
@@ -1109,6 +1137,7 @@ def train(args):
             val_loss,
             best_val_loss,
             global_step,
+            completed_epochs=epoch + 1,
         )
 
         completed_history_row = {

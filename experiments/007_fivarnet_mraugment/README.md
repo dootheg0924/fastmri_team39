@@ -3,7 +3,9 @@
 This experiment adds the fastMRI MRAugment profile from Fabian et al.,
 *Data augmentation for deep learning based accelerated MRI reconstruction
 with limited data* (ICML 2021), to experiment 006. The model, optimizer,
-210,000 optimizer updates, and objective remain unchanged.
+210,000 optimizer-update safety ceiling, and objective remain unchanged. The
+run now has an explicit 100-epoch hard cap and can be resumed from the
+epoch-boundary `model.pt` checkpoint.
 
 ## Paper-aligned augmentation
 
@@ -28,9 +30,9 @@ The base probability uses the paper's normalized exponential schedule:
 
 `p(t) = 0.55 * (1 - exp(-5 * t/T)) / (1 - exp(-5))`.
 
-Because FI-VarNet stops at 210k optimizer steps rather than a fixed epoch
-count, `T` is derived as `ceil(210000 / optimizer_steps_per_epoch)`. This
-preserves the paper's epoch-normalized curve over the complete FI run.
+For this experiment, `T=100`, unless the 210k optimizer-update safety ceiling
+would finish earlier. This preserves the paper's epoch-normalized curve over
+the actual configured run.
 
 ## Deliberate project-specific decisions
 
@@ -52,8 +54,10 @@ preserves the paper's epoch-normalized curve over the complete FI run.
 4. Augmentation and mask RNGs are derived from seed, epoch, filename, and
    slice (mask offset excludes slice). This is reproducible across worker
    counts and resumed runs, unlike mutable per-worker RNG state.
-5. Training remains 210k optimizer updates. MRAugment studies sometimes train
-   longer, but changing duration would confound the augmentation comparison.
+5. Training stops at the first of 100 epochs or 210k optimizer updates. The
+   100-epoch cap makes intentional interruption/resume practical while the
+   original FI safety ceiling prevents an unexpectedly large dataset from
+   exceeding the paper-aligned update budget.
 
 Run with:
 
