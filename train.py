@@ -96,11 +96,15 @@ def apply_training_preset(args):
             else 4
         ),
         'pin_memory': args.training_preset == FINAL_FIVARNET_PRESET,
-        'deterministic': False,
+        # The paper runner is non-deterministic, but the challenge final must
+        # reproduce its submitted score from scratch.
+        'deterministic': (
+            args.training_preset == FINAL_FIVARNET_PRESET
+        ),
         'float32_matmul_precision': 'high',
     }
-    # The paper preset reproduces final-step selection. The submission preset
-    # evaluates every epoch and promotes the best challenge score.
+    # The paper preset reproduces final-step selection. The final submission
+    # preset keeps the latest complete fixed-horizon epoch.
     if getattr(args, 'checkpoint_metric', None) is None:
         overrides['checkpoint_metric'] = (
             'submission-latest'
@@ -227,7 +231,7 @@ def parse():
         choices=['legacy', PAPER_FIVARNET_PRESET, FINAL_FIVARNET_PRESET],
         default='legacy',
         help='Atomic FI-VarNet presets: paper reproduces the fixed-step run; '
-             'final trains for num_epochs and selects the best challenge score',
+             'final trains a fixed epoch horizon and keeps the latest epoch',
     )
     parser.add_argument('--optimizer', choices=['adam', 'adamw'], default='adam',
                         help='Optimizer used for reconstruction training')

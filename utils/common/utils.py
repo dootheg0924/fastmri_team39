@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 from skimage.metrics import structural_similarity
 import h5py
 import numpy as np
+import os
 import torch
 import random
 
@@ -73,12 +74,22 @@ def rss_combine(data, axis, keepdims=False):
     return np.sqrt(np.sum(np.square(np.abs(data)), axis, keepdims=keepdims))
 
 def seed_fix(n, deterministic=True):
+    deterministic = bool(deterministic)
+    if deterministic:
+        # Must be present before CUDA creates a cuBLAS handle. It also reaches
+        # spawned DataLoader workers, unlike setting only Python RNG state.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        os.environ.setdefault("PYTHONHASHSEED", str(int(n)))
     torch.manual_seed(n)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(n)
         torch.cuda.manual_seed_all(n)
-    torch.backends.cudnn.deterministic = bool(deterministic)
+    torch.use_deterministic_algorithms(deterministic)
+    torch.backends.cudnn.deterministic = deterministic
     torch.backends.cudnn.benchmark = False
+    if deterministic:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     np.random.seed(n)
     random.seed(n)
 

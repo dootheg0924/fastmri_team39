@@ -18,6 +18,11 @@ fi
 # shellcheck source=/dev/null
 source "${CONFIG_FILE}"
 
+if ! [[ "${NUM_EPOCHS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] NUM_EPOCHS must be a fixed positive integer." >&2
+  exit 2
+fi
+
 # Keep the smoke test and resolved manifest identical to the atomic paper
 # preset that train.py applies. Data paths/devices and the explicit knee-vs-
 # brain protocol controls (COMBINE_TRAIN_VAL, CHECKPOINT_METRIC) remain
@@ -69,6 +74,7 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'CUDA_VISIBLE_DEVICES=%q\n' "${CUDA_VISIBLE_DEVICES}"
   printf 'TORCH_GPU_NUM=%q\n' "${TORCH_GPU_NUM}"
   printf 'BATCH_SIZE=%q\n' "${BATCH_SIZE}"
+  printf 'FINAL_NUM_EPOCHS=%q\n' "${FINAL_NUM_EPOCHS:-}"
   printf 'NUM_EPOCHS=%q\n' "${NUM_EPOCHS}"
   printf 'MAX_TRAINING_EPOCHS=%q\n' "${MAX_TRAINING_EPOCHS:-}"
   printf 'LEARNING_RATE=%q\n' "${LEARNING_RATE}"
@@ -92,6 +98,8 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'CHECKPOINT_METRIC=%q\n' "${CHECKPOINT_METRIC:-challenge-final}"
   printf 'DETERMINISTIC=%q\n' "${DETERMINISTIC:-1}"
   printf 'FLOAT32_MATMUL_PRECISION=%q\n' "${FLOAT32_MATMUL_PRECISION:-highest}"
+  printf 'CUBLAS_WORKSPACE_CONFIG=%q\n' "${CUBLAS_WORKSPACE_CONFIG:-}"
+  printf 'PYTHONHASHSEED=%q\n' "${PYTHONHASHSEED:-}"
   printf 'MRAUGMENT=%q\n' "${MRAUGMENT:-0}"
   printf 'MRAUGMENT_SCHEDULE=%q\n' "${MRAUGMENT_SCHEDULE:-exp}"
   printf 'MRAUGMENT_STRENGTH=%q\n' "${MRAUGMENT_STRENGTH:-0.55}"
@@ -102,6 +110,8 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'TRAINING_TIME_BUDGET_HOURS=%q\n' "${TRAINING_TIME_BUDGET_HOURS:-}"
   printf 'TRAINING_TIME_RESERVE_FRACTION=%q\n' "${TRAINING_TIME_RESERVE_FRACTION:-0.05}"
   printf 'TRAINING_TIME_PROBE_EPOCHS=%q\n' "${TRAINING_TIME_PROBE_EPOCHS:-2}"
+  printf 'TOTAL_ALLOCATION_HOURS=%q\n' "${TOTAL_ALLOCATION_HOURS:-}"
+  printf 'FINAL_RESERVE_FRACTION=%q\n' "${FINAL_RESERVE_FRACTION:-}"
   printf 'BBOX_LOSS_WEIGHT=%q\n' "${BBOX_LOSS_WEIGHT}"
   printf 'ACC_FILM=%q\n' "${ACC_FILM:-0}"
   printf 'SPLIT_ATTENTION_CASCADES=%q\n' "${SPLIT_ATTENTION_CASCADES:-}"

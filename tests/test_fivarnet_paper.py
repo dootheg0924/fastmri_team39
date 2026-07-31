@@ -123,6 +123,7 @@ def test_final_preset_uses_epochs_and_latest_submission_checkpoint():
     assert args.bbox_loss_weight == pytest.approx(0.5)
     assert args.num_workers == 2
     assert args.pin_memory is True
+    assert args.deterministic is True
 
 
 def test_epoch_lr_schedule_preserves_paper_phase_ratios():
