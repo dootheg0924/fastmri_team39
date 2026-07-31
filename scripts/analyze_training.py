@@ -8,6 +8,7 @@ losses and GPU telemetry are parsed from append-only logs.
 import argparse
 import csv
 import json
+import math
 import re
 from pathlib import Path
 
@@ -19,9 +20,11 @@ import numpy as np
 
 
 ITER_RE = re.compile(
-    r"Epoch\s*=\s*\[\s*(\d+)\s*/\s*(\d+)\s*\]\s*"
-    r"Iter\s*=\s*\[\s*(\d+)\s*/\s*(\d+)\s*\]\s*"
-    r"Loss\s*=\s*([0-9.eE+-]+)"
+    r"Epoch\s*=\s*\[\s*(?P<epoch>\d+)\s*/\s*(?P<epochs>\d+)\s*\]\s*"
+    r"Iter\s*=\s*\[\s*(?P<iteration>\d+)\s*/\s*(?P<total_iter>\d+)\s*\]\s*"
+    r"(?:Step\s*=\s*\[\s*(?P<step>\d+)\s*/\s*[^\]]+\]\s*)?"
+    r"(?:LR\s*=\s*[0-9.eE+-]+\s*)?"
+    r"Loss\s*=\s*(?P<loss>[0-9.eE+-]+)"
 )
 
 
@@ -54,15 +57,20 @@ def read_iteration_losses(path: Path):
             match = ITER_RE.search(line)
             if not match:
                 continue
-            epoch = int(match.group(1))
-            iteration = int(match.group(3))
-            total_iter = int(match.group(4))
+            epoch = int(match.group("epoch"))
+            iteration = int(match.group("iteration"))
+            total_iter = int(match.group("total_iter"))
+            explicit_step = match.group("step")
             rows_by_key[(epoch, iteration)] = {
                 "epoch": epoch,
                 "iter": iteration,
                 "total_iter": total_iter,
-                "global_step": epoch * total_iter + iteration,
-                "loss": float(match.group(5)),
+                "global_step": (
+                    int(explicit_step)
+                    if explicit_step is not None
+                    else epoch * total_iter + iteration
+                ),
+                "loss": float(match.group("loss")),
             }
     return [rows_by_key[key] for key in sorted(rows_by_key)]
 
@@ -197,28 +205,44 @@ def build_summary(exp_name, epoch_rows, iter_rows, gpu_rows):
         "gpu_samples": len(gpu_rows),
     }
     if epoch_rows:
-        best = min(epoch_rows, key=lambda row: row["val_loss"])
-        first = epoch_rows[0]
         last = epoch_rows[-1]
         total_seconds = sum(row["train_time_sec"] + row["val_time_sec"] for row in epoch_rows)
         summary.update(
             {
-                "best_epoch_zero_based": best["epoch"],
-                "best_epoch_one_based": best["epoch"] + 1,
-                "best_val_loss": best["val_loss"],
                 "last_epoch_zero_based": last["epoch"],
                 "last_train_loss": last["train_loss"],
-                "last_val_loss": last["val_loss"],
-                "val_loss_improvement_pct": (
-                    (first["val_loss"] - last["val_loss"]) / first["val_loss"] * 100
-                    if first["val_loss"] != 0 else None
-                ),
-                "generalization_gap_last": last["val_loss"] - last["train_loss"],
                 "total_recorded_time_hours": total_seconds / 3600,
                 "mean_train_time_min": np.mean([row["train_time_sec"] for row in epoch_rows]) / 60,
                 "mean_val_time_min": np.mean([row["val_time_sec"] for row in epoch_rows]) / 60,
             }
         )
+        finite_val_rows = [
+            row for row in epoch_rows if math.isfinite(row["val_loss"])
+        ]
+        if finite_val_rows:
+            best = min(finite_val_rows, key=lambda row: row["val_loss"])
+            first_val = finite_val_rows[0]
+            last_val = finite_val_rows[-1]
+            summary.update(
+                {
+                    "best_epoch_zero_based": best["epoch"],
+                    "best_epoch_one_based": best["epoch"] + 1,
+                    "best_val_loss": best["val_loss"],
+                    "last_val_loss": last_val["val_loss"],
+                    "val_loss_improvement_pct": (
+                        (
+                            first_val["val_loss"] - last_val["val_loss"]
+                        )
+                        / first_val["val_loss"]
+                        * 100
+                        if first_val["val_loss"] != 0
+                        else None
+                    ),
+                    "generalization_gap_last": (
+                        last_val["val_loss"] - last_val["train_loss"]
+                    ),
+                }
+            )
     if gpu_rows:
         summary.update(
             {
@@ -263,7 +287,7 @@ def write_summary(summary, out_dir: Path):
     lines.extend(
         [
             "",
-            "The epoch index emitted by the training code is zero-based. Validation loss is the mean of the per-volume SSIM losses.",
+            "The epoch index emitted by the training code is zero-based. Validation fields are omitted until a finite validation result exists.",
             "",
         ]
     )

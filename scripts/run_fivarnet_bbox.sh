@@ -17,6 +17,38 @@ fi
 
 # shellcheck source=/dev/null
 source "${CONFIG_FILE}"
+
+# Keep the smoke test and resolved manifest identical to the atomic paper
+# preset that train.py applies. Data paths/devices and the explicit knee-vs-
+# brain protocol controls (COMBINE_TRAIN_VAL, CHECKPOINT_METRIC) remain
+# runtime-selectable.
+if [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-paper" ]]; then
+  BATCH_SIZE=1
+  LEARNING_RATE=3e-4
+  SEED=42
+  MODEL_NAME=fivarnet
+  CASCADES=6
+  IMAGE_CASCADES=6
+  CHANS=32
+  SENS_CHANS=8
+  POOLS=4
+  SENS_POOLS=4
+  ATTENTION_CASCADES="0 1 2 3 4 5"
+  KSPACE_MULT_FACTOR=1e6
+  FEATURE_PROCESSOR=paper-unet2d
+  NO_GRAD_CHECKPOINT=0
+  GRADIENT_ACCUMULATION_STEPS=4
+  DATA_SAMPLER_SEED=0
+  CHECKPOINT_METRIC="${CHECKPOINT_METRIC:-paper-final}"
+  DETERMINISTIC=0
+  FLOAT32_MATMUL_PRECISION=high
+  BBOX_LOSS_WEIGHT=0.5
+  ACC_FILM=0
+  SPLIT_ATTENTION_CASCADES=
+  BALANCE_ACCELERATIONS=0
+  NUM_WORKERS=4
+  PIN_MEMORY=0
+fi
 cd "${REPO_ROOT}"
 
 TRAIN_DIR="${DATA_ROOT}/train"
@@ -41,6 +73,7 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'LEARNING_RATE=%q\n' "${LEARNING_RATE}"
   printf 'REPORT_INTERVAL=%q\n' "${REPORT_INTERVAL}"
   printf 'SEED=%q\n' "${SEED}"
+  printf 'TRAINING_PRESET=%q\n' "${TRAINING_PRESET:-legacy}"
   printf 'MODEL_NAME=%q\n' "${MODEL_NAME}"
   printf 'CASCADES=%q\n' "${CASCADES}"
   printf 'IMAGE_CASCADES=%q\n' "${IMAGE_CASCADES}"
@@ -50,6 +83,14 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'SENS_POOLS=%q\n' "${SENS_POOLS}"
   printf 'ATTENTION_CASCADES=%q\n' "${ATTENTION_CASCADES}"
   printf 'KSPACE_MULT_FACTOR=%q\n' "${KSPACE_MULT_FACTOR}"
+  printf 'FEATURE_PROCESSOR=%q\n' "${FEATURE_PROCESSOR:-norm-unet}"
+  printf 'NO_GRAD_CHECKPOINT=%q\n' "${NO_GRAD_CHECKPOINT:-0}"
+  printf 'GRADIENT_ACCUMULATION_STEPS=%q\n' "${GRADIENT_ACCUMULATION_STEPS:-1}"
+  printf 'DATA_SAMPLER_SEED=%q\n' "${DATA_SAMPLER_SEED:-}"
+  printf 'COMBINE_TRAIN_VAL=%q\n' "${COMBINE_TRAIN_VAL:-0}"
+  printf 'CHECKPOINT_METRIC=%q\n' "${CHECKPOINT_METRIC:-challenge-final}"
+  printf 'DETERMINISTIC=%q\n' "${DETERMINISTIC:-1}"
+  printf 'FLOAT32_MATMUL_PRECISION=%q\n' "${FLOAT32_MATMUL_PRECISION:-highest}"
   printf 'BBOX_LOSS_WEIGHT=%q\n' "${BBOX_LOSS_WEIGHT}"
   printf 'ACC_FILM=%q\n' "${ACC_FILM:-0}"
   printf 'SPLIT_ATTENTION_CASCADES=%q\n' "${SPLIT_ATTENTION_CASCADES:-}"
@@ -154,6 +195,12 @@ if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
   if [[ "${ACC_FILM:-0}" == "1" ]]; then
     SMOKE_EXTRA_ARGS+=(--acc-film)
   fi
+  if [[ "${NO_GRAD_CHECKPOINT:-0}" == "1" ]]; then
+    SMOKE_EXTRA_ARGS+=(--no-grad-checkpoint)
+  fi
+  if [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-paper" ]]; then
+    SMOKE_EXTRA_ARGS+=(--paper-training)
+  fi
   if [[ -n "${SPLIT_ATTENTION_CASCADES:-}" ]]; then
     # shellcheck disable=SC2206
     SMOKE_SPLIT_CASCADES=(${SPLIT_ATTENTION_CASCADES})
@@ -171,6 +218,7 @@ if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
     --sens-pools "${SENS_POOLS}" \
     --attention-cascades "${SMOKE_ATTENTION_CASCADES[@]}" \
     --kspace-mult-factor "${KSPACE_MULT_FACTOR}" \
+    --feature-processor "${FEATURE_PROCESSOR:-norm-unet}" \
     --bbox-loss-weight "${BBOX_LOSS_WEIGHT}" \
     "${SMOKE_EXTRA_ARGS[@]}"
 fi
@@ -199,6 +247,7 @@ TRAIN_ARGS=(
   -t "${TRAIN_DIR}"
   -v "${VAL_DIR}"
   --result-root "${RESULT_ROOT}"
+  --training-preset "${TRAINING_PRESET:-legacy}"
   --model-name "${MODEL_NAME}"
   --cascade "${CASCADES}"
   --image-cascades "${IMAGE_CASCADES}"
@@ -208,6 +257,10 @@ TRAIN_ARGS=(
   --sens-pools "${SENS_POOLS}"
   --attention-cascades "${TRAIN_ATTENTION_CASCADES[@]}"
   --kspace-mult-factor "${KSPACE_MULT_FACTOR}"
+  --feature-processor "${FEATURE_PROCESSOR:-norm-unet}"
+  --gradient-accumulation-steps "${GRADIENT_ACCUMULATION_STEPS:-1}"
+  --checkpoint-metric "${CHECKPOINT_METRIC:-challenge-final}"
+  --float32-matmul-precision "${FLOAT32_MATMUL_PRECISION:-highest}"
   --bbox-loss-weight "${BBOX_LOSS_WEIGHT}"
   --seed "${SEED}"
   --num-workers "${NUM_WORKERS}"
@@ -219,6 +272,22 @@ if [[ "${PIN_MEMORY}" == "1" ]]; then
 fi
 if [[ "${ACC_FILM:-0}" == "1" ]]; then
   TRAIN_ARGS+=(--acc-film)
+fi
+if [[ "${NO_GRAD_CHECKPOINT:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--no-grad-checkpoint)
+fi
+if [[ -n "${DATA_SAMPLER_SEED:-}" ]]; then
+  TRAIN_ARGS+=(--data-sampler-seed "${DATA_SAMPLER_SEED}")
+fi
+if [[ "${COMBINE_TRAIN_VAL:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--combine-train-val)
+else
+  TRAIN_ARGS+=(--no-combine-train-val)
+fi
+if [[ "${DETERMINISTIC:-1}" == "1" ]]; then
+  TRAIN_ARGS+=(--deterministic)
+else
+  TRAIN_ARGS+=(--no-deterministic)
 fi
 if [[ -n "${SPLIT_ATTENTION_CASCADES:-}" ]]; then
   # shellcheck disable=SC2206

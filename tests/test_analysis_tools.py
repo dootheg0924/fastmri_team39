@@ -16,6 +16,30 @@ from scripts.analyze_training import (
 
 
 class AnalysisToolsTest(unittest.TestCase):
+    def test_summary_ignores_skipped_validation_rows(self):
+        rows = [
+            {
+                "epoch": 0,
+                "train_loss": 0.2,
+                "val_loss": float("nan"),
+                "train_time_sec": 60,
+                "val_time_sec": 0,
+            },
+            {
+                "epoch": 1,
+                "train_loss": 0.15,
+                "val_loss": 0.18,
+                "train_time_sec": 62,
+                "val_time_sec": 10,
+            },
+        ]
+
+        summary = build_summary("paper-final", rows, [], [])
+
+        self.assertEqual(summary["best_epoch_zero_based"], 1)
+        self.assertAlmostEqual(summary["best_val_loss"], 0.18)
+        self.assertAlmostEqual(summary["last_val_loss"], 0.18)
+
     def test_parses_training_and_gpu_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -48,7 +72,9 @@ class AnalysisToolsTest(unittest.TestCase):
             log_path.write_text(
                 "Epoch = [  0/ 80] Iter = [   0/ 100] Loss = 0.25 Time = 1.0s\n"
                 "Epoch = [  0/ 80] Iter = [  50/ 100] Loss = 0.20 Time = 1.0s\n"
-                "Epoch = [  1/ 80] Iter = [   0/ 100] Loss = 0.17 Time = 1.0s\n",
+                "Epoch = [  1/ 80] Iter = [   3/ 100] "
+                "Step = [101/210000] LR = 4.04e-06 "
+                "Loss = 0.17 Time = 1.0s\n",
                 encoding="utf-8",
             )
 
@@ -66,7 +92,7 @@ class AnalysisToolsTest(unittest.TestCase):
             summary = build_summary("test", epochs, iterations, gpu)
 
             self.assertEqual(len(epochs), 2)
-            self.assertEqual(iterations[-1]["global_step"], 100)
+            self.assertEqual(iterations[-1]["global_step"], 101)
             self.assertEqual(len(gpu), 2)
             self.assertEqual(summary["best_epoch_zero_based"], 1)
             self.assertAlmostEqual(summary["best_val_loss"], 0.16)

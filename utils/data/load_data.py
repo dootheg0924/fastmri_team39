@@ -2,7 +2,7 @@ import h5py
 from utils.data.transforms import DataTransform
 import re
 import torch
-from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.data import ConcatDataset, Dataset, DataLoader, Sampler
 from pathlib import Path
 import numpy as np
 
@@ -99,6 +99,61 @@ class BalancedAccelerationSampler(Sampler):
         }
 
 
+class PaddedRandomSampler(Sampler):
+    """Deterministically shuffle and pad an epoch to an optimizer-step boundary.
+
+    The FI-VarNet reference trains with four DDP ranks and one sample per rank.
+    On this repository's single-process trainer, four sequential microbatches
+    emulate that global batch. Padding mirrors ``DistributedSampler``: every
+    source sample is visited once, then a few samples from the shuffled stream
+    are repeated so every optimizer update is complete.
+    """
+
+    def __init__(self, dataset, multiple=1, seed=0):
+        if multiple <= 0:
+            raise ValueError("Sampler padding multiple must be positive.")
+        if len(dataset) <= 0:
+            raise ValueError("Cannot sample an empty dataset.")
+        self.dataset = dataset
+        self.multiple = int(multiple)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.num_samples = (
+            (len(dataset) + self.multiple - 1) // self.multiple
+        ) * self.multiple
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        indices = torch.randperm(len(self.dataset), generator=generator).tolist()
+        padding = self.num_samples - len(indices)
+        while padding > 0:
+            take = min(padding, len(indices))
+            indices.extend(indices[:take])
+            padding -= take
+
+        # DistributedSampler gives rank r ``indices[r::world_size]``. A DDP
+        # optimizer update consumes the r=0..world_size-1 entries for the same
+        # step, which are consecutive in this padded global ordering.
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def summary(self):
+        return {
+            "mode": "distributed-sampler-emulation",
+            "source_samples": len(self.dataset),
+            "padded_samples": self.num_samples - len(self.dataset),
+            "samples_per_epoch": self.num_samples,
+            "optimizer_microbatches": self.multiple,
+            "seed": self.seed,
+        }
+
+
 class SliceData(Dataset):
     def __init__(self, root, transform, input_key, target_key, forward=False):
         self.transform = transform
@@ -165,16 +220,30 @@ def create_data_loaders(data_path, args, shuffle=False, isforward=False):
     else:
         max_key_ = -1
         target_key_ = -1
-    data_storage = SliceData(
-        root=data_path,
-        transform=DataTransform(isforward, max_key_),
-        input_key=args.input_key,
-        target_key=target_key_,
-        forward = isforward
+    data_paths = (
+        list(data_path)
+        if isinstance(data_path, (list, tuple))
+        else [data_path]
     )
+    datasets = [
+        SliceData(
+            root=path,
+            transform=DataTransform(isforward, max_key_),
+            input_key=args.input_key,
+            target_key=target_key_,
+            forward=isforward,
+        )
+        for path in data_paths
+    ]
+    data_storage = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
 
     sampler = None
     if shuffle and getattr(args, "balance_accelerations", False):
+        if len(datasets) != 1:
+            raise ValueError(
+                "Acceleration balancing cannot be combined with train+val "
+                "concatenation."
+            )
         if args.batch_size != 1:
             raise ValueError(
                 "Acceleration-balanced hard routing requires batch_size=1."
@@ -183,6 +252,16 @@ def create_data_loaders(data_path, args, shuffle=False, isforward=False):
             data_storage,
             mode=getattr(args, "acceleration_balance_mode", "oversample"),
             seed=getattr(args, "seed", 430),
+        )
+        shuffle = False
+    elif shuffle and getattr(args, "gradient_accumulation_steps", 1) > 1:
+        sampler_seed = getattr(args, "data_sampler_seed", None)
+        if sampler_seed is None:
+            sampler_seed = getattr(args, "seed", 0)
+        sampler = PaddedRandomSampler(
+            data_storage,
+            multiple=getattr(args, "gradient_accumulation_steps", 1),
+            seed=sampler_seed,
         )
         shuffle = False
 

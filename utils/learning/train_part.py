@@ -3,6 +3,7 @@ import copy
 import csv
 import gc
 import json
+import math
 import numpy as np
 import torch
 import time
@@ -18,14 +19,17 @@ from collections import defaultdict
 from utils.data.load_data import acceleration_from_filename, create_data_loaders
 from utils.common.utils import save_reconstructions
 from utils.common.bbox_loss import BboxAwareSSIMLoss
+from utils.common.loss_function import SSIMLoss
 from utils.model.varnet import VarNet
 
 import os
 
 HISTORY_FIELDS = [
-    'epoch', 'train_loss', 'val_loss', 'ssim_full', 'ssim_bbox', 'final_score',
+    'epoch', 'train_loss', 'val_loss', 'paper_val_loss',
+    'challenge_val_loss', 'ssim_full', 'ssim_bbox', 'final_score',
     'full_acc4', 'full_acc8', 'bbox_acc4', 'bbox_acc8',
-    'train_time_sec', 'val_time_sec', 'learning_rate', 'is_best',
+    'train_time_sec', 'val_time_sec', 'learning_rate', 'global_step',
+    'samples_seen', 'is_best',
 ]
 
 
@@ -55,19 +59,141 @@ def build_model(args):
             use_checkpoint=not getattr(args, 'no_grad_checkpoint', False),
             use_acc_film=getattr(args, 'acc_film', False),
             split_attention_cascades=getattr(args, 'split_attention_cascades', []),
+            feature_processor=getattr(args, 'feature_processor', 'norm-unet'),
         )
     raise ValueError(f'Unknown model name: {model_name}')
 
 
-def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
+def build_training_loss(args, device):
+    """Build the selected training objective without changing validation scoring."""
+    loss_name = getattr(args, 'loss_name', 'bbox-aware-ssim')
+    if loss_name == 'ssim':
+        return SSIMLoss().to(device=device)
+    if loss_name == 'bbox-aware-ssim':
+        return BboxAwareSSIMLoss(
+            bbox_weight=getattr(args, 'bbox_loss_weight', 1.0)
+        ).to(device=device)
+    raise ValueError(f'Unknown loss name: {loss_name}')
+
+
+def build_optimizer(args, model):
+    """Construct Adam/AdamW with every effective hyperparameter explicit."""
+    kwargs = {
+        'lr': args.lr,
+        'betas': (
+            getattr(args, 'adam_beta1', 0.9),
+            getattr(args, 'adam_beta2', 0.999),
+        ),
+        'eps': getattr(args, 'adam_eps', 1e-8),
+        'weight_decay': getattr(args, 'weight_decay', 0.0),
+        'amsgrad': getattr(args, 'adam_amsgrad', False),
+    }
+    optimizer_name = getattr(args, 'optimizer', 'adam')
+    if optimizer_name == 'adam':
+        return torch.optim.Adam(model.parameters(), **kwargs)
+    if optimizer_name == 'adamw':
+        return torch.optim.AdamW(model.parameters(), **kwargs)
+    raise ValueError(f'Unknown optimizer: {optimizer_name}')
+
+
+def paper_lr_multiplier(
+    step,
+    *,
+    base_lr,
+    warmup_steps,
+    cosine_start_step,
+    max_steps,
+    min_factor,
+):
+    """FI-VarNet warm-up/plateau/quarter-cosine schedule as a LR multiplier."""
+    if base_lr <= 0:
+        raise ValueError('base_lr must be positive.')
+    if warmup_steps <= 0:
+        raise ValueError('warmup_steps must be positive.')
+    if not 0 < warmup_steps <= cosine_start_step < max_steps:
+        raise ValueError(
+            'Expected 0 < warmup_steps <= cosine_start_step < max_steps.'
+        )
+    if not 0 <= min_factor <= 1:
+        raise ValueError('min_factor must be between 0 and 1.')
+
+    step = max(0, min(int(step), int(max_steps)))
+    if step < warmup_steps:
+        return step / warmup_steps
+    if step < cosine_start_step:
+        return 1.0
+
+    progress = (step - cosine_start_step) / (max_steps - cosine_start_step)
+    return max(math.cos(progress * math.pi / 2), min_factor)
+
+
+def build_lr_scheduler(args, optimizer):
+    scheduler_name = getattr(args, 'lr_scheduler', 'none')
+    if scheduler_name == 'none':
+        return None
+    if scheduler_name != 'fi-varnet-paper':
+        raise ValueError(f'Unknown LR scheduler: {scheduler_name}')
+
+    max_steps = getattr(args, 'max_steps', None)
+    if max_steps is None:
+        raise ValueError('The FI-VarNet paper scheduler requires --max-steps.')
+
+    def step_fn(step):
+        return paper_lr_multiplier(
+            step,
+            base_lr=args.lr,
+            warmup_steps=getattr(args, 'lr_warmup_steps', 7500),
+            cosine_start_step=getattr(args, 'lr_cosine_start_step', 150000),
+            max_steps=max_steps,
+            min_factor=getattr(args, 'lr_min_factor', 1e-8),
+        )
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, step_fn)
+
+
+def train_epoch(
+    args,
+    epoch,
+    model,
+    data_loader,
+    optimizer,
+    scheduler,
+    loss_type,
+    device,
+    global_step=0,
+):
     model.train()
     if hasattr(data_loader.sampler, 'set_epoch'):
         data_loader.sampler.set_epoch(epoch)
     start_epoch = start_iter = time.perf_counter()
     len_loader = len(data_loader)
     total_loss = 0.
+    completed_steps = 0
+    completed_microbatches = 0
+    samples_seen = 0
+    max_steps = getattr(args, 'max_steps', None)
+    accumulation_steps = int(
+        getattr(args, 'gradient_accumulation_steps', 1)
+    )
+    if accumulation_steps <= 0:
+        raise ValueError('--gradient-accumulation-steps must be positive.')
+    if len_loader % accumulation_steps != 0:
+        raise ValueError(
+            f'Training loader has {len_loader} microbatches, which is not '
+            f'divisible by gradient accumulation {accumulation_steps}. Use '
+            'the padded paper sampler or change the accumulation setting.'
+        )
 
+    optimizer.zero_grad(set_to_none=True)
+    microbatches_in_step = 0
+    update_loss = 0.0
     for iter, data in enumerate(data_loader):
+        if (
+            microbatches_in_step == 0
+            and max_steps is not None
+            and global_step + completed_steps >= max_steps
+        ):
+            break
         mask, kspace, target, maximum, _, _, boxes = data
         mask = mask.to(device=device, non_blocking=True)
         kspace = kspace.to(device=device, non_blocking=True)
@@ -75,25 +201,57 @@ def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
         maximum = maximum.to(device=device, non_blocking=True)
         # boxes stay on the CPU: only their integer coordinates are used for cropping.
 
-        # With hard-routed experts, a non-selected expert must keep grad=None;
-        # otherwise Adam momentum can update it on the wrong acceleration.
-        optimizer.zero_grad(set_to_none=True)
         output = model(kspace, mask)
-        loss = loss_type(output, target, maximum, boxes)
-        loss.backward()
-        optimizer.step()
+        if getattr(args, 'loss_name', 'bbox-aware-ssim') == 'ssim':
+            loss = loss_type(output, target, maximum)
+        else:
+            loss = loss_type(output, target, maximum, boxes)
+        (loss / accumulation_steps).backward()
         total_loss += loss.item()
+        update_loss += loss.item()
+        completed_microbatches += 1
+        microbatches_in_step += 1
+        samples_seen += int(target.shape[0])
 
-        if iter % args.report_interval == 0:
+        if microbatches_in_step != accumulation_steps:
+            continue
+
+        clip_val = getattr(args, 'gradient_clip_val', 0.0)
+        if clip_val and clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+        completed_steps += 1
+        microbatches_in_step = 0
+
+        current_step = global_step + completed_steps
+        if current_step == 1 or current_step % args.report_interval == 0:
             print(
                 f'Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
                 f'Iter = [{iter:4d}/{len(data_loader):4d}] '
-                f'Loss = {loss.item():.4g} '
+                f'Step = [{current_step}/{max_steps or "-"}] '
+                f'LR = {optimizer.param_groups[0]["lr"]:.4g} '
+                f'Loss = {update_loss / accumulation_steps:.4g} '
                 f'Time = {time.perf_counter() - start_iter:.4f}s',
             )
             start_iter = time.perf_counter()
-    total_loss = total_loss / len_loader
-    return total_loss, time.perf_counter() - start_epoch
+        update_loss = 0.0
+    if microbatches_in_step != 0:
+        raise RuntimeError(
+            'Training stopped inside a gradient-accumulation window; no '
+            'partial optimizer update is allowed.'
+        )
+    if completed_steps == 0:
+        raise RuntimeError('Training epoch completed no optimizer steps.')
+    total_loss = total_loss / completed_microbatches
+    return (
+        total_loss,
+        time.perf_counter() - start_epoch,
+        completed_steps,
+        samples_seen,
+    )
 
 
 def _acc_bucket(fname):
@@ -107,20 +265,28 @@ def _acc_bucket(fname):
     return f'acc{acceleration}'
 
 
-def validate(args, model, val_metric, data_loader, device):
+def validate(args, model, val_metric, data_loader, device, paper_loss=None):
     """Score the validation set with the exact competition metric.
 
     Reproduces recon_eval.py / metrics.py aggregation without cv2: per-slice
     foreground SSIM and per-box bbox SSIM are averaged within each acceleration
     bucket, then final = 0.5 * (SSIM_full + SSIM_bbox) with
     SSIM_full = (full_acc4 + full_acc8) / 2 and likewise for bbox. The returned
-    ``val_loss`` is ``1 - final`` so that "lower is better" still holds.
+    ``paper_val_loss`` is the public FI-VarNet implementation's plain,
+    slice-weighted full-image 1-SSIM. ``val_loss`` selects either this value or
+    ``1 - final`` according to ``args.checkpoint_metric``. ``paper-final``
+    reports the same SSIM value but reserves model selection for the final
+    210k-step checkpoint, matching the paper's knee protocol.
     """
+    if paper_loss is None:
+        paper_loss = SSIMLoss().to(device=device)
     model.eval()
     reconstructions = defaultdict(dict)
     targets = defaultdict(dict)
     agg = {acc: {'full_total': 0.0, 'full_idx': 0, 'bbox_total': 0.0, 'bbox_idx': 0}
            for acc in ('acc4', 'acc8')}
+    paper_loss_total = 0.0
+    paper_loss_count = 0
     start = time.perf_counter()
 
     with torch.no_grad():
@@ -131,6 +297,9 @@ def validate(args, model, val_metric, data_loader, device):
             maximum = maximum.to(device=device, non_blocking=True)
             output = model(kspace, mask)
             target_dev = target.to(device=device, non_blocking=True)
+            batch_paper_loss = paper_loss(output, target_dev, maximum)
+            paper_loss_total += float(batch_paper_loss.item()) * output.shape[0]
+            paper_loss_count += output.shape[0]
 
             full_scores = val_metric.foreground_ssim_score(output, target_dev, maximum)
             box_scores = val_metric.bbox_ssim_scores(output, target_dev, maximum, boxes)
@@ -166,9 +335,25 @@ def validate(args, model, val_metric, data_loader, device):
     ssim_full = (full4 + full8) / 2
     ssim_bbox = (bbox4 + bbox8) / 2
     final_score = 0.5 * ssim_full + 0.5 * ssim_bbox
+    challenge_val_loss = 1.0 - final_score
+    paper_val_loss = (
+        paper_loss_total / paper_loss_count
+        if paper_loss_count > 0
+        else float('inf')
+    )
+    checkpoint_metric = getattr(args, 'checkpoint_metric', 'challenge-final')
+    if checkpoint_metric in {'paper-ssim', 'paper-final'}:
+        selected_val_loss = paper_val_loss
+    elif checkpoint_metric == 'challenge-final':
+        selected_val_loss = challenge_val_loss
+    else:
+        raise ValueError(f'Unknown checkpoint metric: {checkpoint_metric}')
 
     result = {
-        'val_loss': 1.0 - final_score,
+        'val_loss': selected_val_loss,
+        'paper_val_loss': paper_val_loss,
+        'challenge_val_loss': challenge_val_loss,
+        'checkpoint_metric': checkpoint_metric,
         'final_score': final_score,
         'ssim_full': ssim_full,
         'ssim_bbox': ssim_bbox,
@@ -179,6 +364,25 @@ def validate(args, model, val_metric, data_loader, device):
         'num_subjects': len(reconstructions),
     }
     return result, reconstructions, targets, time.perf_counter() - start
+
+
+def checkpoint_decision(args, val_loss, best_val_loss, global_step):
+    """Return updated best loss and whether to promote this checkpoint.
+
+    The paper's knee experiment skipped validation, so its authoritative
+    checkpoint is the final optimizer state. The released brain runner and
+    legacy challenge training retain validation-based selection.
+    """
+    checkpoint_metric = getattr(args, 'checkpoint_metric', 'challenge-final')
+    if checkpoint_metric == 'paper-final':
+        max_steps = getattr(args, 'max_steps', None)
+        if max_steps is None:
+            raise ValueError('paper-final checkpointing requires --max-steps.')
+        is_final = int(global_step) >= int(max_steps)
+        return (float(val_loss) if is_final else float(best_val_loss), is_final)
+
+    is_new_best = float(val_loss) < float(best_val_loss)
+    return min(float(best_val_loss), float(val_loss)), is_new_best
 
 
 def capture_rng_state():
@@ -219,12 +423,27 @@ def save_val_loss_log(history, out_path):
     os.replace(tmp_path, out_path)
 
 
-def save_model(args, exp_dir, epoch, model, optimizer, best_val_loss, is_new_best, history):
+def save_model(
+    args,
+    exp_dir,
+    epoch,
+    model,
+    optimizer,
+    best_val_loss,
+    is_new_best,
+    history,
+    scheduler=None,
+    global_step=0,
+    samples_seen=0,
+):
     checkpoint = {
         'epoch': epoch,
+        'global_step': int(global_step),
+        'samples_seen': int(samples_seen),
         'args': args,
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict() if scheduler is not None else None,
         'optimizer_parameter_names': [
             name for name, _ in model.named_parameters()
         ],
@@ -249,7 +468,7 @@ def save_model(args, exp_dir, epoch, model, optimizer, best_val_loss, is_new_bes
         os.replace(snapshot_tmp, snapshot_path)
 
 
-def load_checkpoint(checkpoint_path, model, optimizer, device):
+def load_checkpoint(checkpoint_path, model, optimizer, device, scheduler=None):
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint['model'])
     optimizer.load_state_dict(checkpoint['optimizer'])
@@ -257,12 +476,22 @@ def load_checkpoint(checkpoint_path, model, optimizer, device):
         for key, value in state.items():
             if torch.is_tensor(value):
                 state[key] = value.to(device=device)
+    scheduler_state = checkpoint.get('scheduler')
+    if scheduler is not None:
+        if scheduler_state is None:
+            raise ValueError(
+                'Checkpoint has no scheduler state but this run requests one; '
+                'resume with the original training configuration.'
+            )
+        scheduler.load_state_dict(scheduler_state)
     restore_rng_state(checkpoint.get('rng_state'))
     best_val_loss = checkpoint.get('best_val_loss', float('inf'))
     if torch.is_tensor(best_val_loss):
         best_val_loss = best_val_loss.item()
     return (
         checkpoint['epoch'],
+        int(checkpoint.get('global_step', 0)),
+        int(checkpoint.get('samples_seen', 0)),
         float(best_val_loss),
         checkpoint.get('history', []),
         checkpoint.get('warm_start_metadata'),
@@ -278,6 +507,7 @@ WARM_START_MODEL_FIELDS = (
     'pools',
     'sens_pools',
     'attention_cascades',
+    'feature_processor',
     'kspace_mult_factor',
     'acc_film',
     'bbox_loss_weight',
@@ -514,6 +744,9 @@ def write_run_metadata(args, device):
 
         
 def train(args):
+    torch.set_float32_matmul_precision(
+        getattr(args, 'float32_matmul_precision', 'highest')
+    )
     device = torch.device(f'cuda:{args.GPU_NUM}' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
         torch.cuda.set_device(device)
@@ -581,28 +814,47 @@ def train(args):
     model = build_model(args)
     model.to(device=device)
 
-    loss_type = BboxAwareSSIMLoss(
+    loss_type = build_training_loss(args, device)
+    validation_metric = BboxAwareSSIMLoss(
         bbox_weight=getattr(args, 'bbox_loss_weight', 1.0)
     ).to(device=device)
-    optimizer = torch.optim.Adam(model.parameters(), args.lr)
+    paper_validation_loss = SSIMLoss().to(device=device)
+    optimizer = build_optimizer(args, model)
+    scheduler = build_lr_scheduler(args, optimizer)
 
     best_val_loss = float('inf')
     start_epoch = 0
+    global_step = 0
+    samples_seen = 0
     history = []
 
     if resume_existing:
-        start_epoch, best_val_loss, history, warm_start_metadata = load_checkpoint(
-            checkpoint_path, model, optimizer, device
+        (
+            start_epoch,
+            global_step,
+            samples_seen,
+            best_val_loss,
+            history,
+            warm_start_metadata,
+        ) = load_checkpoint(
+            checkpoint_path, model, optimizer, device, scheduler=scheduler
         )
         if warm_start_metadata is not None:
             args.warm_start_metadata = warm_start_metadata
         print(f'Resumed from {checkpoint_path} at epoch {start_epoch}; '
-              f'best val loss: {best_val_loss:.6f}')
+              f'global step {global_step}; best val loss: {best_val_loss:.6f}')
     elif warm_start_checkpoint is not None:
+        if scheduler is not None:
+            raise ValueError(
+                'Attention-split warm-start does not support a new LR scheduler. '
+                'Use the source experiment optimizer configuration.'
+            )
         warm_start_rng = copy.deepcopy(warm_start_checkpoint.get('rng_state'))
         start_epoch, source_lr, details = load_attention_split_warm_start(
             warm_start_checkpoint, model, optimizer, device
         )
+        global_step = int(warm_start_checkpoint.get('global_step', 0))
+        samples_seen = int(warm_start_checkpoint.get('samples_seen', 0))
         args.lr = source_lr
         args.warm_start_metadata.update(details)
         args.warm_start_metadata['optimizer_state_migrated'] = True
@@ -617,7 +869,18 @@ def train(args):
     write_run_metadata(args, device)
 
     
-    train_loader = create_data_loaders(data_path = args.data_path_train, args = args, shuffle=True)
+    train_paths = [args.data_path_train]
+    if getattr(args, 'combine_train_val', False):
+        train_paths.append(args.data_path_val)
+        print(
+            'Paper data protocol: training on train + validation splits; '
+            'validation is still evaluated separately.'
+        )
+    train_loader = create_data_loaders(
+        data_path=train_paths,
+        args=args,
+        shuffle=True,
+    )
     val_loader = create_data_loaders(data_path = args.data_path_val, args = args)
     if hasattr(train_loader.sampler, 'summary'):
         summary = train_loader.sampler.summary()
@@ -626,13 +889,7 @@ def train(args):
         with sampling_tmp.open('w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
         os.replace(sampling_tmp, sampling_path)
-        print(
-            'Acceleration-balanced training sampler: '
-            f'mode={summary["mode"]}, source acc4/acc8='
-            f'{summary["source_acc4"]}/{summary["source_acc8"]}, '
-            f'sampled per acceleration={summary["sampled_per_acceleration"]}, '
-            f'steps per epoch={summary["samples_per_epoch"]}.'
-        )
+        print(f'Training sampler: {summary}')
 
     if warm_started:
         print(
@@ -640,7 +897,12 @@ def train(args):
             'warm-start baseline.'
         )
         baseline_result, baseline_recons, baseline_targets, baseline_time = validate(
-            args, model, loss_type, val_loader, device
+            args,
+            model,
+            validation_metric,
+            val_loader,
+            device,
+            paper_loss=paper_validation_loss,
         )
         if baseline_result['num_subjects'] == 0:
             raise RuntimeError('Validation loader produced no subjects at warm-start.')
@@ -667,36 +929,147 @@ def train(args):
         save_model(
             args, args.exp_dir, start_epoch, model, optimizer,
             best_val_loss, True, history,
+            scheduler=scheduler, global_step=global_step,
+            samples_seen=samples_seen,
         )
         del baseline_recons, baseline_targets, warm_start_checkpoint
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
-    if start_epoch >= args.num_epochs:
-        print(f'Checkpoint already reached epoch {start_epoch}; requested epochs: {args.num_epochs}.')
+    max_steps = getattr(args, 'max_steps', None)
+    if max_steps is not None and max_steps <= 0:
+        raise ValueError('--max-steps must be positive.')
+    if getattr(args, 'checkpoint_metric', None) == 'paper-final' and max_steps is None:
+        raise ValueError('paper-final checkpointing requires --max-steps.')
+
+    if max_steps is not None:
+        training_complete = global_step >= max_steps
+        completion_message = (
+            f'Checkpoint already reached step {global_step}; '
+            f'requested steps: {max_steps}.'
+        )
+    else:
+        training_complete = start_epoch >= args.num_epochs
+        completion_message = (
+            f'Checkpoint already reached epoch {start_epoch}; '
+            f'requested epochs: {args.num_epochs}.'
+        )
+    if training_complete:
+        if (
+            getattr(args, 'checkpoint_metric', None) == 'paper-final'
+            and checkpoint_path.exists()
+        ):
+            # A process may have stopped after atomically replacing model.pt
+            # but before copying it to the inference filename. Re-promote the
+            # completed final checkpoint on resume as an idempotent repair.
+            best_tmp = args.exp_dir / 'best_model.pt.tmp'
+            shutil.copyfile(checkpoint_path, best_tmp)
+            os.replace(best_tmp, args.exp_dir / 'best_model.pt')
+        print(completion_message)
         return
 
-    for epoch in range(start_epoch, args.num_epochs):
+    epoch = start_epoch
+    while (
+        (max_steps is None and epoch < args.num_epochs)
+        or (max_steps is not None and global_step < max_steps)
+    ):
         print(f'Epoch #{epoch:2d} ............... {args.net_name} ...............')
         
-        train_loss, train_time = train_epoch(
-            args, epoch, model, train_loader, optimizer, loss_type, device
+        train_loss, train_time, completed_steps, epoch_samples_seen = train_epoch(
+            args,
+            epoch,
+            model,
+            train_loader,
+            optimizer,
+            scheduler,
+            loss_type,
+            device,
+            global_step=global_step,
         )
+        global_step += completed_steps
+        samples_seen += epoch_samples_seen
+
+        paper_final_pending_row = False
+        if getattr(args, 'checkpoint_metric', None) == 'paper-final':
+            # The paper explicitly skipped knee validation. Persist every
+            # epoch boundary without inspecting the held-out split. At 210k,
+            # promote the authoritative weights *before* the reporting-only
+            # evaluation so a validation failure cannot lose the final model.
+            reached_final_step = global_step >= max_steps
+            nan = float('nan')
+            history.append({
+                'epoch': epoch,
+                'train_loss': float(train_loss),
+                'val_loss': nan,
+                'paper_val_loss': nan,
+                'challenge_val_loss': nan,
+                'ssim_full': nan,
+                'ssim_bbox': nan,
+                'final_score': nan,
+                'full_acc4': nan,
+                'full_acc8': nan,
+                'bbox_acc4': nan,
+                'bbox_acc8': nan,
+                'train_time_sec': float(train_time),
+                'val_time_sec': 0.0,
+                'learning_rate': float(optimizer.param_groups[0]['lr']),
+                'global_step': int(global_step),
+                'samples_seen': int(samples_seen),
+                'is_best': 0,
+            })
+            save_training_history(
+                history, args.val_loss_dir / 'training_history.csv'
+            )
+            save_val_loss_log(history, args.val_loss_dir / 'val_loss_log.npy')
+            save_model(
+                args, args.exp_dir, epoch + 1, model, optimizer,
+                best_val_loss, reached_final_step, history,
+                scheduler=scheduler, global_step=global_step,
+                samples_seen=samples_seen,
+            )
+            if not reached_final_step:
+                print(
+                    f'Epoch = [{epoch:4d}] TrainLoss = {train_loss:.4g} '
+                    f'Step = [{global_step}/{max_steps}] '
+                    f'Samples = {samples_seen} '
+                    'Validation = skipped '
+                    '(paper knee final-checkpoint protocol) '
+                    f'TrainTime = {train_time:.4f}s',
+                )
+                epoch += 1
+                continue
+            paper_final_pending_row = True
+            print(
+                f'Authoritative paper checkpoint saved at step {global_step}; '
+                'running held-out reporting metrics.',
+            )
+
         val_result, reconstructions, targets, val_time = validate(
-            args, model, loss_type, val_loader, device
+            args,
+            model,
+            validation_metric,
+            val_loader,
+            device,
+            paper_loss=paper_validation_loss,
         )
         if val_result['num_subjects'] == 0:
             raise RuntimeError('Validation loader produced no subjects.')
         val_loss = float(val_result['val_loss'])
 
-        is_new_best = val_loss < best_val_loss
-        best_val_loss = min(best_val_loss, val_loss)
+        best_val_loss, is_new_best = checkpoint_decision(
+            args,
+            val_loss,
+            best_val_loss,
+            global_step,
+        )
 
-        history.append({
+        completed_history_row = {
             'epoch': epoch,
             'train_loss': float(train_loss),
             'val_loss': val_loss,
+            'paper_val_loss': float(val_result['paper_val_loss']),
+            'challenge_val_loss': float(val_result['challenge_val_loss']),
             'ssim_full': float(val_result['ssim_full']),
             'ssim_bbox': float(val_result['ssim_bbox']),
             'final_score': float(val_result['final_score']),
@@ -707,8 +1080,14 @@ def train(args):
             'train_time_sec': float(train_time),
             'val_time_sec': float(val_time),
             'learning_rate': float(optimizer.param_groups[0]['lr']),
+            'global_step': int(global_step),
+            'samples_seen': int(samples_seen),
             'is_best': int(is_new_best),
-        })
+        }
+        if paper_final_pending_row:
+            history[-1] = completed_history_row
+        else:
+            history.append(completed_history_row)
         save_training_history(history, args.val_loss_dir / 'training_history.csv')
         save_val_loss_log(history, args.val_loss_dir / 'val_loss_log.npy')
         print(f"Training history saved to {args.val_loss_dir}")
@@ -716,10 +1095,17 @@ def train(args):
         save_model(
             args, args.exp_dir, epoch + 1, model, optimizer,
             best_val_loss, is_new_best, history,
+            scheduler=scheduler, global_step=global_step,
+            samples_seen=samples_seen,
         )
         print(
             f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g} '
-            f'ValLoss = {val_loss:.4g} (final={val_result["final_score"]:.4f} '
+            f'Step = [{global_step}/{max_steps or "-"}] '
+            f'Samples = {samples_seen} '
+            f'ValLoss[{val_result["checkpoint_metric"]}] = {val_loss:.4g} '
+            f'(paper={val_result["paper_val_loss"]:.4g} '
+            f'challenge={val_result["challenge_val_loss"]:.4g} '
+            f'final={val_result["final_score"]:.4f} '
             f'full={val_result["ssim_full"]:.4f} bbox={val_result["ssim_bbox"]:.4f}) '
             f'TrainTime = {train_time:.4f}s ValTime = {val_time:.4f}s',
         )
@@ -731,3 +1117,4 @@ def train(args):
             print(
                 f'ForwardTime = {time.perf_counter() - start:.4f}s',
             )
+        epoch += 1

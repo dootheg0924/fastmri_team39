@@ -2,6 +2,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import torch
+
 REPO_ROOT = Path(__file__).resolve().parent
 MODEL_ROOT = REPO_ROOT / 'utils' / 'model'
 if str(MODEL_ROOT) not in sys.path:
@@ -9,6 +11,90 @@ if str(MODEL_ROOT) not in sys.path:
 from utils.learning.train_part import train  # noqa: E402
 
 from utils.common.utils import seed_fix  # noqa: E402
+
+
+PAPER_FIVARNET_PRESET = 'fi-varnet-paper'
+
+
+def apply_training_preset(args):
+    """Apply reproducible, named training configurations after CLI parsing.
+
+    This repository's FI-VarNet profile uses the paper's size-matched 6
+    feature-space + 6 image-space model, with checkpointing and batch 1 for
+    GTX 1080 training. Keeping the values here makes the configuration atomic:
+    callers cannot accidentally combine the architecture with a different
+    optimizer, loss, or stopping rule.
+    """
+    if args.training_preset != PAPER_FIVARNET_PRESET:
+        if getattr(args, 'checkpoint_metric', None) is None:
+            args.checkpoint_metric = 'challenge-final'
+        return args
+
+    overrides = {
+        # Architecture (Giannakopoulos et al., Scientific Reports 2024).
+        'model_name': 'fivarnet',
+        'cascade': 6,
+        'image_cascades': 6,
+        'chans': 32,
+        'sens_chans': 8,
+        'pools': 4,
+        'sens_pools': 4,
+        'attention_cascades': list(range(6)),
+        'kspace_mult_factor': 1e6,
+        'feature_processor': 'paper-unet2d',
+        # Checkpoint every sensitivity/feature/image cascade so the 93.8M
+        # model can be smoke-tested and trained on an 8 GB GTX 1080.
+        'no_grad_checkpoint': False,
+        'acc_film': False,
+        'split_attention_cascades': [],
+        'balance_accelerations': False,
+        # Optimization and loss.
+        'batch_size': 1,
+        # FI-VarNet NormStats and variable-length bbox annotations require a
+        # physical batch of one. Four sequential microbatches reproduce the
+        # reference four-GPU run's effective optimizer batch without raising
+        # the single-GPU activation peak.
+        'gradient_accumulation_steps': 4,
+        'lr': 3e-4,
+        'optimizer': 'adamw',
+        'weight_decay': 0.0,
+        # exp/003 metric-aligned objective:
+        # (1 - foreground SSIM) + 0.5 * mean(1 - bbox SSIM).
+        'loss_name': 'bbox-aware-ssim',
+        'bbox_loss_weight': 0.5,
+        'lr_scheduler': 'fi-varnet-paper',
+        'max_steps': 210_000,
+        'lr_warmup_steps': 7_500,
+        # The authors' released implementation uses 150k; the paper describes
+        # the preceding 140k-step plateau approximately.
+        'lr_cosine_start_step': 150_000,
+        'lr_min_factor': 1e-8,
+        'gradient_clip_val': 1.0,
+        # Explicit PyTorch AdamW defaults used by the reference implementation.
+        'adam_beta1': 0.9,
+        'adam_beta2': 0.999,
+        'adam_eps': 1e-8,
+        'adam_amsgrad': False,
+        'seed': 42,
+        # Reference runtime protocol. The train/validation split remains a
+        # runtime data-protocol choice: the knee paper uses train only, while
+        # the released brain leaderboard runner combines train + validation.
+        'data_sampler_seed': 0,
+        'num_workers': 4,
+        'pin_memory': False,
+        'deterministic': False,
+        'float32_matmul_precision': 'high',
+    }
+    # Model selection is a data protocol rather than an optimizer
+    # hyperparameter. The knee paper skipped validation and used the final
+    # 210k-step weights; the released brain runner monitored validation SSIM.
+    if getattr(args, 'checkpoint_metric', None) is None:
+        overrides['checkpoint_metric'] = 'paper-final'
+
+    for name, value in overrides.items():
+        setattr(args, name, value)
+    args.training_preset_overrides = overrides
+    return args
 
 
 def parse():
@@ -46,6 +132,79 @@ def parse():
                         help='Keep an epoch snapshot every N epochs; 0 disables snapshots')
     parser.add_argument('--num-workers', type=int, default=0, help='DataLoader worker processes')
     parser.add_argument('--pin-memory', action='store_true', help='Use pinned DataLoader memory for CUDA transfers')
+    parser.add_argument(
+        '--combine-train-val',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Use both train and validation splits as training data while still '
+             'evaluating on validation (the released brain leaderboard protocol)',
+    )
+    parser.add_argument(
+        '--gradient-accumulation-steps',
+        type=int,
+        default=1,
+        help='Batch-1 microbatches averaged before one optimizer update',
+    )
+    parser.add_argument(
+        '--data-sampler-seed',
+        type=int,
+        default=None,
+        help='Shuffle seed; the paper DDP DistributedSampler uses 0',
+    )
+    parser.add_argument(
+        '--deterministic',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Enable cuDNN deterministic mode; disabled by the public FI-VarNet runner',
+    )
+    parser.add_argument(
+        '--float32-matmul-precision',
+        choices=['highest', 'high', 'medium'],
+        default='highest',
+        help='torch float32 matrix multiplication precision policy',
+    )
+    parser.add_argument(
+        '--training-preset',
+        choices=['legacy', PAPER_FIVARNET_PRESET],
+        default='legacy',
+        help='Atomic FI-VarNet preset: paper 6+6 architecture adapted for '
+             'GTX 1080 checkpointing and the exp/003 bbox-aware objective',
+    )
+    parser.add_argument('--optimizer', choices=['adam', 'adamw'], default='adam',
+                        help='Optimizer used for reconstruction training')
+    parser.add_argument('--weight-decay', type=float, default=0.0,
+                        help='Optimizer weight decay')
+    parser.add_argument('--adam-beta1', type=float, default=0.9)
+    parser.add_argument('--adam-beta2', type=float, default=0.999)
+    parser.add_argument('--adam-eps', type=float, default=1e-8)
+    parser.add_argument('--adam-amsgrad', action='store_true')
+    parser.add_argument(
+        '--lr-scheduler',
+        choices=['none', 'fi-varnet-paper'],
+        default='none',
+        help='Per-optimizer-step learning-rate schedule',
+    )
+    parser.add_argument('--max-steps', type=int, default=None,
+                        help='Stop after this many optimizer updates, independent of epochs')
+    parser.add_argument('--lr-warmup-steps', type=int, default=7500)
+    parser.add_argument('--lr-cosine-start-step', type=int, default=150000)
+    parser.add_argument('--lr-min-factor', type=float, default=1e-8,
+                        help='Minimum LambdaLR multiplier in the paper scheduler')
+    parser.add_argument('--gradient-clip-val', type=float, default=0.0,
+                        help='Global gradient-norm clipping; 0 disables clipping')
+    parser.add_argument(
+        '--loss-name',
+        choices=['bbox-aware-ssim', 'ssim'],
+        default='bbox-aware-ssim',
+        help='Training objective. ssim is the paper 1-SSIM objective',
+    )
+    parser.add_argument(
+        '--checkpoint-metric',
+        choices=['challenge-final', 'paper-ssim', 'paper-final'],
+        default=None,
+        help='Checkpoint protocol. Defaults to challenge-final for legacy '
+             'training and paper-final for the FI-VarNet paper preset',
+    )
     
     parser.add_argument('--cascade', type=int, default=1, help='Number of cascades | Should be less than 12') ## important hyperparameter
     parser.add_argument('--chans', type=int, default=9, help='Number of channels for cascade U-Net | 18 in original varnet') ## important hyperparameter
@@ -63,6 +222,13 @@ def parse():
                         help='[fivarnet] Feature-cascade indices with aliasing attention (subset keeps 8GB VRAM)')
     parser.add_argument('--kspace-mult-factor', type=float, default=1e6,
                         help='[fivarnet] k-space scaling applied before / undone after the cascades')
+    parser.add_argument(
+        '--feature-processor',
+        choices=['norm-unet', 'paper-unet2d'],
+        default='norm-unet',
+        help='[fivarnet] Feature-cascade U-Net; paper-unet2d is the archived '
+             'fastMRI FI-VarNet implementation',
+    )
     parser.add_argument('--no-grad-checkpoint', action='store_true',
                         help='[fivarnet] Disable gradient checkpointing (uses more VRAM)')
     parser.add_argument('--acc-film', action='store_true',
@@ -95,14 +261,15 @@ def parse():
     parser.add_argument('--seed', type=int, default=430, help='Fix random seed')
 
     args = parser.parse_args()
-    return args
+    return apply_training_preset(args)
 
 if __name__ == '__main__':
     args = parse()
     
     # fix seed
     if args.seed is not None:
-        seed_fix(args.seed)
+        seed_fix(args.seed, deterministic=args.deterministic)
+    torch.set_float32_matmul_precision(args.float32_matmul_precision)
 
     experiment_dir = args.result_root / args.net_name
     args.exp_dir = experiment_dir / 'checkpoints'

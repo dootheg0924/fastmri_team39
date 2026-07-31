@@ -72,12 +72,12 @@ def ifftc(data, axes=(-2, -1), norm="ortho"):
 def rss_combine(data, axis, keepdims=False):
     return np.sqrt(np.sum(np.square(np.abs(data)), axis, keepdims=keepdims))
 
-def seed_fix(n):
+def seed_fix(n, deterministic=True):
     torch.manual_seed(n)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(n)
         torch.cuda.manual_seed_all(n)
-    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.deterministic = bool(deterministic)
     torch.backends.cudnn.benchmark = False
     np.random.seed(n)
     random.seed(n)
