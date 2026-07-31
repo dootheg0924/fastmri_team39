@@ -9,6 +9,60 @@ from torch import nn
 from torch.nn import functional as F
 
 
+def deterministic_reflect_pad2d(image: torch.Tensor, padding) -> torch.Tensor:
+    """Apply 2D reflection padding with a deterministic CUDA backward pass.
+
+    ``torch.nn.functional.pad(..., mode="reflect")`` has a nondeterministic
+    CUDA backward implementation. Building the same reflected border from
+    non-overlapping slices keeps the forward values unchanged while autograd
+    uses deterministic slice, flip, concatenation, and addition operations.
+
+    Args:
+        image: Tensor whose final two dimensions are height and width.
+        padding: ``(left, right, top, bottom)`` padding widths.
+    """
+    if len(padding) != 4:
+        raise ValueError("2D reflection padding requires four values.")
+
+    left, right, top, bottom = (int(value) for value in padding)
+    if min(left, right, top, bottom) < 0:
+        raise ValueError("Reflection padding values must be non-negative.")
+
+    height, width = image.shape[-2:]
+    if left >= width or right >= width:
+        raise ValueError(
+            "Reflection padding on either side must be smaller than the input width."
+        )
+    if top >= height or bottom >= height:
+        raise ValueError(
+            "Reflection padding on either side must be smaller than the input height."
+        )
+
+    if left or right:
+        horizontal = []
+        if left:
+            horizontal.append(image[..., 1:left + 1].flip(-1))
+        horizontal.append(image)
+        if right:
+            horizontal.append(
+                image[..., width - right - 1:width - 1].flip(-1)
+            )
+        image = torch.cat(horizontal, dim=-1)
+
+    if top or bottom:
+        vertical = []
+        if top:
+            vertical.append(image[..., 1:top + 1, :].flip(-2))
+        vertical.append(image)
+        if bottom:
+            vertical.append(
+                image[..., height - bottom - 1:height - 1, :].flip(-2)
+            )
+        image = torch.cat(vertical, dim=-2)
+
+    return image
+
+
 class Unet(nn.Module):
     """
     PyTorch implementation of a U-Net model.
@@ -95,7 +149,7 @@ class Unet(nn.Module):
             if output.shape[-2] != downsample_layer.shape[-2]:
                 padding[3] = 1  # padding bottom
             if torch.sum(torch.tensor(padding)) != 0:
-                output = F.pad(output, padding, "reflect")
+                output = deterministic_reflect_pad2d(output, padding)
 
             output = torch.cat([output, downsample_layer], dim=1)
             output = conv(output)

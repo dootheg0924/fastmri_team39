@@ -217,6 +217,9 @@ if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
   if [[ "${NO_GRAD_CHECKPOINT:-0}" == "1" ]]; then
     SMOKE_EXTRA_ARGS+=(--no-grad-checkpoint)
   fi
+  if [[ "${DETERMINISTIC:-1}" == "1" ]]; then
+    SMOKE_EXTRA_ARGS+=(--deterministic)
+  fi
   if [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-paper" ]]; then
     SMOKE_EXTRA_ARGS+=(--paper-training)
   elif [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-final" ]]; then

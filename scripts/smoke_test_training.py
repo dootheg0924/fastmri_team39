@@ -29,6 +29,7 @@ from utils.learning.train_part import (  # noqa: E402
     build_model,
     build_optimizer,
 )
+from unet import deterministic_reflect_pad2d  # noqa: E402
 
 
 def _mask_acceleration(mask: np.ndarray) -> int:
@@ -117,6 +118,11 @@ def main():
     )
     parser.add_argument("--no-grad-checkpoint", action="store_true")
     parser.add_argument("--acc-film", action="store_true")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Enforce deterministic PyTorch algorithms during the smoke test.",
+    )
     parser.add_argument("--bbox-loss-weight", type=float, default=1.0)
     parser.add_argument(
         "--paper-training",
@@ -135,6 +141,21 @@ def main():
         raise SystemExit("[ERROR] CUDA is required for the long-run smoke test")
     device = torch.device(f"cuda:{args.gpu_num}")
     torch.cuda.set_device(device)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+
+        # Exercise a non-divisible shape so the replacement for PyTorch's
+        # nondeterministic reflection-pad CUDA backward is always checked,
+        # independently of the selected real MRI slice dimensions.
+        padding_probe = torch.randn(
+            1, 1, 5, 7, device=device, requires_grad=True
+        )
+        deterministic_reflect_pad2d(
+            padding_probe, (2, 1, 3, 0)
+        ).square().sum().backward()
+        torch.cuda.synchronize(device)
+        print("Deterministic reflection-padding CUDA backward: OK")
 
     dataset = SliceData(
         root=args.data_root / "train",

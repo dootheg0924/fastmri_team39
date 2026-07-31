@@ -31,7 +31,12 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 import fastmri
-from unet import ConvBlock, TransposeConvBlock, Unet
+from unet import (
+    ConvBlock,
+    TransposeConvBlock,
+    Unet,
+    deterministic_reflect_pad2d,
+)
 from varnet import NormUnet, SensitivityModel, VarNetBlock
 from utils.common.utils import center_crop
 
@@ -257,8 +262,8 @@ class FeatureUnet2d(nn.Module):
         pad_height = (self.factor - (height - self.factor)) % self.factor
         pad_width = (self.factor - (width - self.factor)) % self.factor
         if pad_height or pad_width:
-            image = F.pad(
-                image, (0, pad_width, 0, pad_height), mode="reflect"
+            image = deterministic_reflect_pad2d(
+                image, (0, pad_width, 0, pad_height)
             )
         return self.final_conv(self.layer(image))[..., :height, :width]
 
@@ -284,7 +289,9 @@ class AttentionPE(nn.Module):
         pad_right = pad_total // 2
         pad_left = pad_total - pad_right
         if pad_total > 0:
-            x = F.pad(x, (pad_left, pad_right, 0, 0), "reflect")
+            x = deterministic_reflect_pad2d(
+                x, (pad_left, pad_right, 0, 0)
+            )
         return (
             torch.stack(x.chunk(chunks=accel, dim=3), dim=-1)
             .view(chans, -1, accel)
