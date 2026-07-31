@@ -91,6 +91,13 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'CHECKPOINT_METRIC=%q\n' "${CHECKPOINT_METRIC:-challenge-final}"
   printf 'DETERMINISTIC=%q\n' "${DETERMINISTIC:-1}"
   printf 'FLOAT32_MATMUL_PRECISION=%q\n' "${FLOAT32_MATMUL_PRECISION:-highest}"
+  printf 'MRAUGMENT=%q\n' "${MRAUGMENT:-0}"
+  printf 'MRAUGMENT_SCHEDULE=%q\n' "${MRAUGMENT_SCHEDULE:-exp}"
+  printf 'MRAUGMENT_STRENGTH=%q\n' "${MRAUGMENT_STRENGTH:-0.55}"
+  printf 'MRAUGMENT_EXP_DECAY=%q\n' "${MRAUGMENT_EXP_DECAY:-5.0}"
+  printf 'MRAUGMENT_DELAY_EPOCHS=%q\n' "${MRAUGMENT_DELAY_EPOCHS:-0}"
+  printf 'MRAUGMENT_SEED=%q\n' "${MRAUGMENT_SEED:-42}"
+  printf 'MRAUGMENT_MIN_BBOX_SIZE=%q\n' "${MRAUGMENT_MIN_BBOX_SIZE:-7}"
   printf 'BBOX_LOSS_WEIGHT=%q\n' "${BBOX_LOSS_WEIGHT}"
   printf 'ACC_FILM=%q\n' "${ACC_FILM:-0}"
   printf 'SPLIT_ATTENTION_CASCADES=%q\n' "${SPLIT_ATTENTION_CASCADES:-}"
@@ -308,6 +315,19 @@ if [[ "${BALANCE_ACCELERATIONS:-0}" == "1" ]]; then
     --balance-accelerations
     --acceleration-balance-mode "${ACCELERATION_BALANCE_MODE:-oversample}"
   )
+fi
+if [[ "${MRAUGMENT:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(
+    --mraugment
+    --mraugment-schedule "${MRAUGMENT_SCHEDULE:-exp}"
+    --mraugment-strength "${MRAUGMENT_STRENGTH:-0.55}"
+    --mraugment-exp-decay "${MRAUGMENT_EXP_DECAY:-5.0}"
+    --mraugment-delay-epochs "${MRAUGMENT_DELAY_EPOCHS:-0}"
+    --mraugment-seed "${MRAUGMENT_SEED:-42}"
+    --mraugment-min-bbox-size "${MRAUGMENT_MIN_BBOX_SIZE:-7}"
+  )
+else
+  TRAIN_ARGS+=(--no-mraugment)
 fi
 
 echo "Training command: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} ${TRAIN_ARGS[*]}"

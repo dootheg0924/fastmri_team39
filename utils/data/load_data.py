@@ -192,6 +192,10 @@ class SliceData(Dataset):
     def __len__(self):
         return len(self.kspace_examples)
 
+    def set_epoch(self, epoch):
+        if hasattr(self.transform, "set_epoch"):
+            self.transform.set_epoch(epoch)
+
     def __getitem__(self, i):
         if not self.forward:
             image_fname, _ = self.image_examples[i]
@@ -214,6 +218,7 @@ class SliceData(Dataset):
 
 
 def create_data_loaders(data_path, args, shuffle=False, isforward=False):
+    is_train = bool(shuffle and not isforward)
     if not isforward:
         max_key_ = args.max_key
         target_key_ = args.target_key
@@ -228,7 +233,9 @@ def create_data_loaders(data_path, args, shuffle=False, isforward=False):
     datasets = [
         SliceData(
             root=path,
-            transform=DataTransform(isforward, max_key_),
+            transform=DataTransform(
+                isforward, max_key_, args=args, is_train=is_train
+            ),
             input_key=args.input_key,
             target_key=target_key_,
             forward=isforward,
@@ -272,6 +279,20 @@ def create_data_loaders(data_path, args, shuffle=False, isforward=False):
         sampler=sampler,
         num_workers=getattr(args, 'num_workers', 0),
         pin_memory=getattr(args, 'pin_memory', False),
-        persistent_workers=getattr(args, 'num_workers', 0) > 0,
+        # MRAugment schedules p by epoch. Recreating workers lets each copied
+        # transform observe the parent dataset's newly assigned epoch.
+        persistent_workers=(
+            getattr(args, 'num_workers', 0) > 0
+            and not (is_train and getattr(args, "mraugment", False))
+        ),
     )
     return data_loader
+
+
+def set_data_epoch(dataset, epoch):
+    """Propagate an epoch to SliceData, including train+val concatenations."""
+    if isinstance(dataset, ConcatDataset):
+        for child in dataset.datasets:
+            set_data_epoch(child, epoch)
+    elif hasattr(dataset, "set_epoch"):
+        dataset.set_epoch(epoch)

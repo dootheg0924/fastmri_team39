@@ -16,7 +16,12 @@ import sys
 from datetime import datetime, timezone
 
 from collections import defaultdict
-from utils.data.load_data import acceleration_from_filename, create_data_loaders
+from utils.data.load_data import (
+    acceleration_from_filename,
+    create_data_loaders,
+    set_data_epoch,
+)
+from utils.data.mraugment import augmentation_probability
 from utils.common.utils import save_reconstructions
 from utils.common.bbox_loss import BboxAwareSSIMLoss
 from utils.common.loss_function import SSIMLoss
@@ -165,6 +170,7 @@ def train_epoch(
     model.train()
     if hasattr(data_loader.sampler, 'set_epoch'):
         data_loader.sampler.set_epoch(epoch)
+    set_data_epoch(data_loader.dataset, epoch)
     start_epoch = start_iter = time.perf_counter()
     len_loader = len(data_loader)
     total_loss = 0.
@@ -866,9 +872,6 @@ def train(args):
     elif args.resume:
         print(f'No checkpoint found at {checkpoint_path}; starting a new run.')
 
-    write_run_metadata(args, device)
-
-    
     train_paths = [args.data_path_train]
     if getattr(args, 'combine_train_val', False):
         train_paths.append(args.data_path_val)
@@ -882,6 +885,37 @@ def train(args):
         shuffle=True,
     )
     val_loader = create_data_loaders(data_path = args.data_path_val, args = args)
+    if getattr(args, 'mraugment', False):
+        accumulation_steps = int(
+            getattr(args, 'gradient_accumulation_steps', 1)
+        )
+        if len(train_loader) % accumulation_steps != 0:
+            raise ValueError(
+                'MRAugment scheduling requires a complete optimizer-step '
+                'boundary at every epoch.'
+            )
+        steps_per_epoch = len(train_loader) // accumulation_steps
+        max_steps = getattr(args, 'max_steps', None)
+        args.mraugment_total_epochs = (
+            math.ceil(max_steps / steps_per_epoch)
+            if max_steps is not None
+            else int(args.num_epochs)
+        )
+        if args.mraugment_total_epochs <= getattr(
+            args, 'mraugment_delay_epochs', 0
+        ):
+            raise ValueError(
+                'MRAugment total schedule epochs must exceed its delay.'
+            )
+        print(
+            'MRAugment schedule: '
+            f'{args.mraugment_schedule}, '
+            f'p_max={args.mraugment_strength:g}, '
+            f'decay={args.mraugment_exp_decay:g}, '
+            f'total_epochs={args.mraugment_total_epochs}, '
+            f'steps_per_epoch={steps_per_epoch}.'
+        )
+    write_run_metadata(args, device)
     if hasattr(train_loader.sampler, 'summary'):
         summary = train_loader.sampler.summary()
         sampling_path = args.val_loss_dir / 'acceleration_sampling.json'
@@ -974,7 +1008,20 @@ def train(args):
         (max_steps is None and epoch < args.num_epochs)
         or (max_steps is not None and global_step < max_steps)
     ):
-        print(f'Epoch #{epoch:2d} ............... {args.net_name} ...............')
+        augmentation_p = 0.0
+        if getattr(args, 'mraugment', False):
+            augmentation_p = augmentation_probability(
+                epoch,
+                args.mraugment_total_epochs,
+                schedule=args.mraugment_schedule,
+                maximum=args.mraugment_strength,
+                decay=args.mraugment_exp_decay,
+                delay=args.mraugment_delay_epochs,
+            )
+        print(
+            f'Epoch #{epoch:2d} ............... {args.net_name} '
+            f'............... MRAugment p={augmentation_p:.6f}'
+        )
         
         train_loss, train_time, completed_steps, epoch_samples_seen = train_epoch(
             args,

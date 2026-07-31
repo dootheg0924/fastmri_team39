@@ -164,6 +164,48 @@ def parse():
         help='torch float32 matrix multiplication precision policy',
     )
     parser.add_argument(
+        '--mraugment',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Apply paper-aligned MRAugment to full training k-space before masking',
+    )
+    parser.add_argument(
+        '--mraugment-schedule',
+        choices=['constant', 'ramp', 'exp'],
+        default='exp',
+        help='Epoch-level augmentation probability schedule',
+    )
+    parser.add_argument(
+        '--mraugment-strength',
+        type=float,
+        default=0.55,
+        help='Maximum base probability p_max (paper fastMRI default: 0.55)',
+    )
+    parser.add_argument(
+        '--mraugment-exp-decay',
+        type=float,
+        default=5.0,
+        help='Normalized exponential schedule coefficient c',
+    )
+    parser.add_argument(
+        '--mraugment-delay-epochs',
+        type=int,
+        default=0,
+        help='Initial epochs with zero augmentation',
+    )
+    parser.add_argument(
+        '--mraugment-seed',
+        type=int,
+        default=42,
+        help='Stable augmentation and regenerated-mask seed',
+    )
+    parser.add_argument(
+        '--mraugment-min-bbox-size',
+        type=int,
+        default=7,
+        help='Cancel sample geometry if an augmented box is smaller than this',
+    )
+    parser.add_argument(
         '--training-preset',
         choices=['legacy', PAPER_FIVARNET_PRESET],
         default='legacy',
