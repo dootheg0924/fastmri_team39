@@ -18,3 +18,4 @@ nohup.out
 /results/
 /leaderboard/
 *.tmp
+/example_data/
