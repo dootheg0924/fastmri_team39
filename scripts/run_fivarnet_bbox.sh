@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Experiment 003 runner (FI-VarNet + bbox-aware loss).
+# FI-VarNet experiment runner (bbox loss, optional FiLM/attention split).
 # Same telemetry/resume workflow as scripts/run_varnet_c6_long.sh, extended
 # with the fivarnet model arguments. Works on VESSL and on a local GTX 1080
 # (override DATA_ROOT/RESULT_ROOT via environment variables).
@@ -17,6 +17,43 @@ fi
 
 # shellcheck source=/dev/null
 source "${CONFIG_FILE}"
+
+if ! [[ "${NUM_EPOCHS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] NUM_EPOCHS must be a fixed positive integer." >&2
+  exit 2
+fi
+
+# Keep the smoke test and resolved manifest identical to the atomic paper
+# preset that train.py applies. Data paths/devices and the explicit knee-vs-
+# brain protocol controls (COMBINE_TRAIN_VAL, CHECKPOINT_METRIC) remain
+# runtime-selectable.
+if [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-paper" ]]; then
+  BATCH_SIZE=1
+  LEARNING_RATE=3e-4
+  SEED=42
+  MODEL_NAME=fivarnet
+  CASCADES=6
+  IMAGE_CASCADES=6
+  CHANS=32
+  SENS_CHANS=8
+  POOLS=4
+  SENS_POOLS=4
+  ATTENTION_CASCADES="0 1 2 3 4 5"
+  KSPACE_MULT_FACTOR=1e6
+  FEATURE_PROCESSOR=paper-unet2d
+  NO_GRAD_CHECKPOINT=0
+  GRADIENT_ACCUMULATION_STEPS=4
+  DATA_SAMPLER_SEED=0
+  CHECKPOINT_METRIC="${CHECKPOINT_METRIC:-paper-final}"
+  DETERMINISTIC=0
+  FLOAT32_MATMUL_PRECISION=high
+  BBOX_LOSS_WEIGHT=0.5
+  ACC_FILM=0
+  SPLIT_ATTENTION_CASCADES=
+  BALANCE_ACCELERATIONS=0
+  NUM_WORKERS=4
+  PIN_MEMORY=0
+fi
 cd "${REPO_ROOT}"
 
 TRAIN_DIR="${DATA_ROOT}/train"
@@ -37,10 +74,13 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'CUDA_VISIBLE_DEVICES=%q\n' "${CUDA_VISIBLE_DEVICES}"
   printf 'TORCH_GPU_NUM=%q\n' "${TORCH_GPU_NUM}"
   printf 'BATCH_SIZE=%q\n' "${BATCH_SIZE}"
+  printf 'FINAL_NUM_EPOCHS=%q\n' "${FINAL_NUM_EPOCHS:-}"
   printf 'NUM_EPOCHS=%q\n' "${NUM_EPOCHS}"
+  printf 'MAX_TRAINING_EPOCHS=%q\n' "${MAX_TRAINING_EPOCHS:-}"
   printf 'LEARNING_RATE=%q\n' "${LEARNING_RATE}"
   printf 'REPORT_INTERVAL=%q\n' "${REPORT_INTERVAL}"
   printf 'SEED=%q\n' "${SEED}"
+  printf 'TRAINING_PRESET=%q\n' "${TRAINING_PRESET:-legacy}"
   printf 'MODEL_NAME=%q\n' "${MODEL_NAME}"
   printf 'CASCADES=%q\n' "${CASCADES}"
   printf 'IMAGE_CASCADES=%q\n' "${IMAGE_CASCADES}"
@@ -50,8 +90,34 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'SENS_POOLS=%q\n' "${SENS_POOLS}"
   printf 'ATTENTION_CASCADES=%q\n' "${ATTENTION_CASCADES}"
   printf 'KSPACE_MULT_FACTOR=%q\n' "${KSPACE_MULT_FACTOR}"
+  printf 'FEATURE_PROCESSOR=%q\n' "${FEATURE_PROCESSOR:-norm-unet}"
+  printf 'NO_GRAD_CHECKPOINT=%q\n' "${NO_GRAD_CHECKPOINT:-0}"
+  printf 'GRADIENT_ACCUMULATION_STEPS=%q\n' "${GRADIENT_ACCUMULATION_STEPS:-1}"
+  printf 'DATA_SAMPLER_SEED=%q\n' "${DATA_SAMPLER_SEED:-}"
+  printf 'COMBINE_TRAIN_VAL=%q\n' "${COMBINE_TRAIN_VAL:-0}"
+  printf 'CHECKPOINT_METRIC=%q\n' "${CHECKPOINT_METRIC:-challenge-final}"
+  printf 'DETERMINISTIC=%q\n' "${DETERMINISTIC:-1}"
+  printf 'FLOAT32_MATMUL_PRECISION=%q\n' "${FLOAT32_MATMUL_PRECISION:-highest}"
+  printf 'CUBLAS_WORKSPACE_CONFIG=%q\n' "${CUBLAS_WORKSPACE_CONFIG:-}"
+  printf 'PYTHONHASHSEED=%q\n' "${PYTHONHASHSEED:-}"
+  printf 'MRAUGMENT=%q\n' "${MRAUGMENT:-0}"
+  printf 'MRAUGMENT_SCHEDULE=%q\n' "${MRAUGMENT_SCHEDULE:-exp}"
+  printf 'MRAUGMENT_STRENGTH=%q\n' "${MRAUGMENT_STRENGTH:-0.55}"
+  printf 'MRAUGMENT_EXP_DECAY=%q\n' "${MRAUGMENT_EXP_DECAY:-5.0}"
+  printf 'MRAUGMENT_DELAY_EPOCHS=%q\n' "${MRAUGMENT_DELAY_EPOCHS:-0}"
+  printf 'MRAUGMENT_SEED=%q\n' "${MRAUGMENT_SEED:-42}"
+  printf 'MRAUGMENT_MIN_BBOX_SIZE=%q\n' "${MRAUGMENT_MIN_BBOX_SIZE:-7}"
+  printf 'TRAINING_TIME_BUDGET_HOURS=%q\n' "${TRAINING_TIME_BUDGET_HOURS:-}"
+  printf 'TRAINING_TIME_RESERVE_FRACTION=%q\n' "${TRAINING_TIME_RESERVE_FRACTION:-0.05}"
+  printf 'TRAINING_TIME_PROBE_EPOCHS=%q\n' "${TRAINING_TIME_PROBE_EPOCHS:-2}"
   printf 'BBOX_LOSS_WEIGHT=%q\n' "${BBOX_LOSS_WEIGHT}"
   printf 'ACC_FILM=%q\n' "${ACC_FILM:-0}"
+  printf 'SPLIT_ATTENTION_CASCADES=%q\n' "${SPLIT_ATTENTION_CASCADES:-}"
+  printf 'WARM_START_CHECKPOINT=%q\n' "${WARM_START_CHECKPOINT:-}"
+  printf 'EXPECTED_WARM_START_EPOCH=%q\n' "${EXPECTED_WARM_START_EPOCH:-}"
+  printf 'ADDITIONAL_EPOCHS=%q\n' "${ADDITIONAL_EPOCHS:-}"
+  printf 'BALANCE_ACCELERATIONS=%q\n' "${BALANCE_ACCELERATIONS:-0}"
+  printf 'ACCELERATION_BALANCE_MODE=%q\n' "${ACCELERATION_BALANCE_MODE:-oversample}"
   printf 'NUM_WORKERS=%q\n' "${NUM_WORKERS}"
   printf 'PIN_MEMORY=%q\n' "${PIN_MEMORY}"
   printf 'CHECKPOINT_INTERVAL=%q\n' "${CHECKPOINT_INTERVAL}"
@@ -114,6 +180,11 @@ for required_dir in \
   fi
 done
 
+if [[ -n "${WARM_START_CHECKPOINT:-}" && ! -f "${WARM_START_CHECKPOINT}" ]]; then
+  echo "[ERROR] Warm-start checkpoint not found: ${WARM_START_CHECKPOINT}" >&2
+  exit 3
+fi
+
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "[ERROR] nvidia-smi is unavailable. This experiment requires a CUDA GPU." >&2
   exit 4
@@ -135,9 +206,27 @@ nvidia-smi -q > "${EXP_DIR}/gpu_environment.txt"
 echo "[Result filesystem]"
 df -h "${RESULT_ROOT}"
 
-# shellcheck disable=SC2086  # ATTENTION_CASCADES is a space-separated int list
 if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
   echo "[INFO] Running a one-slice forward/backward smoke test (peak VRAM check)."
+  # shellcheck disable=SC2206
+  SMOKE_ATTENTION_CASCADES=(${ATTENTION_CASCADES})
+  SMOKE_EXTRA_ARGS=()
+  if [[ "${ACC_FILM:-0}" == "1" ]]; then
+    SMOKE_EXTRA_ARGS+=(--acc-film)
+  fi
+  if [[ "${NO_GRAD_CHECKPOINT:-0}" == "1" ]]; then
+    SMOKE_EXTRA_ARGS+=(--no-grad-checkpoint)
+  fi
+  if [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-paper" ]]; then
+    SMOKE_EXTRA_ARGS+=(--paper-training)
+  elif [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-final" ]]; then
+    SMOKE_EXTRA_ARGS+=(--final-training)
+  fi
+  if [[ -n "${SPLIT_ATTENTION_CASCADES:-}" ]]; then
+    # shellcheck disable=SC2206
+    SMOKE_SPLIT_CASCADES=(${SPLIT_ATTENTION_CASCADES})
+    SMOKE_EXTRA_ARGS+=(--split-attention-cascades "${SMOKE_SPLIT_CASCADES[@]}")
+  fi
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/smoke_test_training.py \
     --data-root "${DATA_ROOT}" \
     --gpu-num "${TORCH_GPU_NUM}" \
@@ -148,9 +237,11 @@ if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
     --sens-chans "${SENS_CHANS}" \
     --pools "${POOLS}" \
     --sens-pools "${SENS_POOLS}" \
-    --attention-cascades ${ATTENTION_CASCADES} \
+    --attention-cascades "${SMOKE_ATTENTION_CASCADES[@]}" \
     --kspace-mult-factor "${KSPACE_MULT_FACTOR}" \
-    --bbox-loss-weight "${BBOX_LOSS_WEIGHT}"
+    --feature-processor "${FEATURE_PROCESSOR:-norm-unet}" \
+    --bbox-loss-weight "${BBOX_LOSS_WEIGHT}" \
+    "${SMOKE_EXTRA_ARGS[@]}"
 fi
 
 if [[ ! -s "${GPU_LOG}" ]]; then
@@ -164,7 +255,8 @@ nvidia-smi \
 GPU_MONITOR_PID=$!
 echo "GPU monitor PID: ${GPU_MONITOR_PID}"
 
-# shellcheck disable=SC2086
+# shellcheck disable=SC2206
+TRAIN_ATTENTION_CASCADES=(${ATTENTION_CASCADES})
 TRAIN_ARGS=(
   python -u train.py
   -g "${TORCH_GPU_NUM}"
@@ -176,6 +268,7 @@ TRAIN_ARGS=(
   -t "${TRAIN_DIR}"
   -v "${VAL_DIR}"
   --result-root "${RESULT_ROOT}"
+  --training-preset "${TRAINING_PRESET:-legacy}"
   --model-name "${MODEL_NAME}"
   --cascade "${CASCADES}"
   --image-cascades "${IMAGE_CASCADES}"
@@ -183,19 +276,82 @@ TRAIN_ARGS=(
   --sens_chans "${SENS_CHANS}"
   --pools "${POOLS}"
   --sens-pools "${SENS_POOLS}"
-  --attention-cascades ${ATTENTION_CASCADES}
+  --attention-cascades "${TRAIN_ATTENTION_CASCADES[@]}"
   --kspace-mult-factor "${KSPACE_MULT_FACTOR}"
+  --feature-processor "${FEATURE_PROCESSOR:-norm-unet}"
+  --gradient-accumulation-steps "${GRADIENT_ACCUMULATION_STEPS:-1}"
+  --checkpoint-metric "${CHECKPOINT_METRIC:-challenge-final}"
+  --float32-matmul-precision "${FLOAT32_MATMUL_PRECISION:-highest}"
   --bbox-loss-weight "${BBOX_LOSS_WEIGHT}"
   --seed "${SEED}"
   --num-workers "${NUM_WORKERS}"
   --checkpoint-interval "${CHECKPOINT_INTERVAL}"
   --resume
 )
+if [[ -n "${MAX_TRAINING_EPOCHS:-}" ]]; then
+  TRAIN_ARGS+=(--max-training-epochs "${MAX_TRAINING_EPOCHS}")
+fi
+if [[ -n "${TRAINING_TIME_BUDGET_HOURS:-}" ]]; then
+  TRAIN_ARGS+=(
+    --training-time-budget-hours "${TRAINING_TIME_BUDGET_HOURS}"
+    --training-time-reserve-fraction "${TRAINING_TIME_RESERVE_FRACTION:-0.05}"
+    --training-time-probe-epochs "${TRAINING_TIME_PROBE_EPOCHS:-2}"
+  )
+fi
 if [[ "${PIN_MEMORY}" == "1" ]]; then
   TRAIN_ARGS+=(--pin-memory)
 fi
 if [[ "${ACC_FILM:-0}" == "1" ]]; then
   TRAIN_ARGS+=(--acc-film)
+fi
+if [[ "${NO_GRAD_CHECKPOINT:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--no-grad-checkpoint)
+fi
+if [[ -n "${DATA_SAMPLER_SEED:-}" ]]; then
+  TRAIN_ARGS+=(--data-sampler-seed "${DATA_SAMPLER_SEED}")
+fi
+if [[ "${COMBINE_TRAIN_VAL:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--combine-train-val)
+else
+  TRAIN_ARGS+=(--no-combine-train-val)
+fi
+if [[ "${DETERMINISTIC:-1}" == "1" ]]; then
+  TRAIN_ARGS+=(--deterministic)
+else
+  TRAIN_ARGS+=(--no-deterministic)
+fi
+if [[ -n "${SPLIT_ATTENTION_CASCADES:-}" ]]; then
+  # shellcheck disable=SC2206
+  TRAIN_SPLIT_CASCADES=(${SPLIT_ATTENTION_CASCADES})
+  TRAIN_ARGS+=(--split-attention-cascades "${TRAIN_SPLIT_CASCADES[@]}")
+fi
+if [[ -n "${WARM_START_CHECKPOINT:-}" ]]; then
+  TRAIN_ARGS+=(--warm-start-checkpoint "${WARM_START_CHECKPOINT}")
+fi
+if [[ -n "${EXPECTED_WARM_START_EPOCH:-}" ]]; then
+  TRAIN_ARGS+=(--expected-warm-start-epoch "${EXPECTED_WARM_START_EPOCH}")
+fi
+if [[ -n "${ADDITIONAL_EPOCHS:-}" ]]; then
+  TRAIN_ARGS+=(--additional-epochs "${ADDITIONAL_EPOCHS}")
+fi
+if [[ "${BALANCE_ACCELERATIONS:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(
+    --balance-accelerations
+    --acceleration-balance-mode "${ACCELERATION_BALANCE_MODE:-oversample}"
+  )
+fi
+if [[ "${MRAUGMENT:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(
+    --mraugment
+    --mraugment-schedule "${MRAUGMENT_SCHEDULE:-exp}"
+    --mraugment-strength "${MRAUGMENT_STRENGTH:-0.55}"
+    --mraugment-exp-decay "${MRAUGMENT_EXP_DECAY:-5.0}"
+    --mraugment-delay-epochs "${MRAUGMENT_DELAY_EPOCHS:-0}"
+    --mraugment-seed "${MRAUGMENT_SEED:-42}"
+    --mraugment-min-bbox-size "${MRAUGMENT_MIN_BBOX_SIZE:-7}"
+  )
+else
+  TRAIN_ARGS+=(--no-mraugment)
 fi
 
 echo "Training command: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} ${TRAIN_ARGS[*]}"

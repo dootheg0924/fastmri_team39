@@ -2,7 +2,9 @@
 
 Ported from Giannakopoulos et al., "Accelerated MRI reconstructions via
 variational network and feature domain learning", Scientific Reports 2024
-(reference implementation: IliasGiannakopoulosLab/VarNet, varnets/VarNet.py).
+(author-contributed reference implementation pinned at fastMRI commit
+b66159850dbdc2569d7683f6f86bcd5cc8534339 under
+``fastmri_examples/feature_varnet``).
 
 Differences from the reference, driven by this repository's constraints:
 - Reuses the baseline `varnet.py` building blocks (SensitivityModel,
@@ -11,12 +13,14 @@ Differences from the reference, driven by this repository's constraints:
 - The per-sample acceleration is inferred from the mask's outer sampling
   stride at forward time (acc4/acc8 volumes are mixed with batch=1, and the
   actual sampled-line counts differ from the nominal file names).
-- Attention is enabled only on a subset of feature cascades
-  (`attention_cascades`) and gradient checkpointing is applied per cascade,
-  both required to fit training in 8GB VRAM (GTX 1080).
+- Legacy experiments may select an attention subset. The current
+  ``fi-varnet-paper`` GTX profile enables attention in all six feature
+  cascades and checkpoints every cascade; its launch-time VRAM smoke test
+  verifies the paper's 6+6 model on the actual 8 GB GPU before a long run.
 - Batch size 1 is assumed (AttentionPE block reshape and NormStats).
 """
 
+import copy
 import math
 from typing import List, NamedTuple, Optional, Tuple
 
@@ -27,7 +31,7 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 import fastmri
-from unet import Unet
+from unet import ConvBlock, TransposeConvBlock, Unet
 from varnet import NormUnet, SensitivityModel, VarNetBlock
 from utils.common.utils import center_crop
 
@@ -72,6 +76,7 @@ class NormStats(nn.Module):
 class FeatureImage(NamedTuple):
     features: Tensor
     sens_maps: Tensor
+    crop_size: Optional[Tuple[int, int]]
     means: Tensor
     variances: Tensor
     mask: Tensor
@@ -146,6 +151,116 @@ class FeatureNormUnet(nn.Module):
         x = self.unet(x)
         x = self.unpad(x, *pad_sizes)
         return self.unnorm(x, mean, std)
+
+
+def image_crop(image: Tensor, crop_size: Optional[Tuple[int, int]]) -> Tensor:
+    """Center-crop the final two dimensions like the paper-linked fastMRI code."""
+    if crop_size is None:
+        return image
+    crop_h = min(int(crop_size[0]), image.shape[-2])
+    crop_w = min(int(crop_size[1]), image.shape[-1])
+    h_from = (image.shape[-2] - crop_h) // 2
+    w_from = (image.shape[-1] - crop_w) // 2
+    return image[..., h_from:h_from + crop_h, w_from:w_from + crop_w].contiguous()
+
+
+def _calc_uncrop(crop_size: int, input_size: int) -> Tuple[int, int]:
+    pad = (input_size - crop_size) // 2
+    pad_before = pad + 1 if (input_size - crop_size) % 2 else pad
+    return pad_before, input_size - pad
+
+
+def image_uncrop(image: Tensor, original_image: Tensor) -> Tensor:
+    """Insert a center crop back into a clone of the original feature tensor."""
+    if image.shape == original_image.shape:
+        return image
+    h_from, h_to = _calc_uncrop(image.shape[-2], original_image.shape[-2])
+    w_from, w_to = _calc_uncrop(image.shape[-1], original_image.shape[-1])
+    output = original_image.clone()
+    output[..., h_from:h_to, w_from:w_to] = image
+    return output
+
+
+class FeatureUnetLevel(nn.Module):
+    """Recursive U-Net level used by the paper-linked FI-VarNet implementation."""
+
+    def __init__(
+        self,
+        child: Optional[nn.Module],
+        in_planes: int,
+        out_planes: int,
+        drop_prob: float = 0.0,
+    ):
+        super().__init__()
+        self.out_planes = out_planes
+        self.left_block = ConvBlock(in_planes, out_planes, drop_prob)
+        self.child = child
+        if child is not None:
+            self.downsample = nn.AvgPool2d(kernel_size=2, stride=2, padding=0)
+            self.upsample = TransposeConvBlock(child.out_planes, out_planes)
+            self.right_block = ConvBlock(2 * out_planes, out_planes, drop_prob)
+
+    def forward(self, image: Tensor) -> Tensor:
+        image = self.left_block(image)
+        if self.child is not None:
+            child_output = self.child(self.downsample(image))
+            image = self.right_block(
+                torch.cat((image, self.upsample(child_output)), dim=1)
+            )
+        return image
+
+
+class FeatureUnet2d(nn.Module):
+    """Exact feature processor used by the paper's archived fastMRI example.
+
+    Unlike ``FeatureNormUnet``, this network has no outer mean/std
+    normalization and its final 1x1 convolution is followed by InstanceNorm
+    and LeakyReLU.  The base width is 32 independently of the feature tensor
+    width.
+    """
+
+    def __init__(
+        self,
+        in_chans: int,
+        out_chans: int,
+        chans: int = 32,
+        num_pool_layers: int = 4,
+        drop_prob: float = 0.0,
+    ):
+        super().__init__()
+        self.factor = 2 ** num_pool_layers
+
+        planes = 2 ** num_pool_layers
+        layer = None
+        for _ in range(num_pool_layers):
+            planes //= 2
+            layer = FeatureUnetLevel(
+                layer,
+                in_planes=planes * chans,
+                out_planes=2 * planes * chans,
+                drop_prob=drop_prob,
+            )
+        self.layer = FeatureUnetLevel(
+            layer,
+            in_planes=in_chans,
+            out_planes=chans,
+            drop_prob=drop_prob,
+        )
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(chans, out_chans, kernel_size=1, bias=False),
+            nn.InstanceNorm2d(out_chans),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+        )
+
+    def forward(self, image: Tensor) -> Tensor:
+        height, width = image.shape[-2:]
+        pad_height = (self.factor - (height - self.factor)) % self.factor
+        pad_width = (self.factor - (width - self.factor)) % self.factor
+        if pad_height or pad_width:
+            image = F.pad(
+                image, (0, pad_width, 0, pad_height), mode="reflect"
+            )
+        return self.final_conv(self.layer(image))[..., :height, :width]
 
 
 class AttentionPE(nn.Module):
@@ -237,12 +352,22 @@ class AttentionFeatureVarNetBlock(nn.Module):
         attention_layer: Optional[AttentionPE] = None,
         use_extra_feature_conv: bool = False,
         use_acc_film: bool = False,
+        split_attention: bool = False,
     ):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.feature_processor = feature_processor
         self.attention_layer = attention_layer
+        if split_attention and attention_layer is None:
+            raise ValueError("split_attention requires an attention layer.")
+        # Keep the original ``attention_layer`` key as the acc4 expert so an
+        # unsplit checkpoint remains a strict subset of the split state dict.
+        # The warm-start loader copies both weights and Adam moments from this
+        # module into the acc8 expert.
+        self.attention_layer_acc8 = (
+            copy.deepcopy(attention_layer) if split_attention else None
+        )
         self.use_image_conv = use_extra_feature_conv
         self.dc_weight = nn.Parameter(torch.ones(1))
 
@@ -297,6 +422,20 @@ class AttentionFeatureVarNetBlock(nn.Module):
         )
         return self.dc_weight * self.encode_from_kspace(dc_residual, feature_image)
 
+    def apply_feature_processor(self, feature_image: FeatureImage) -> Tensor:
+        if feature_image.crop_size is None:
+            return self.feature_processor(feature_image.features)
+        cropped = image_crop(feature_image.features, feature_image.crop_size)
+        return image_uncrop(
+            self.feature_processor(cropped),
+            feature_image.features,
+        )
+
+    def _attention_for_acceleration(self, accel: int) -> Optional[AttentionPE]:
+        if self.attention_layer_acc8 is not None and accel >= 6:
+            return self.attention_layer_acc8
+        return self.attention_layer
+
     def forward(self, feature_image: FeatureImage, accel: int) -> FeatureImage:
         feature_image = feature_image._replace(
             features=self.input_norm(feature_image.features)
@@ -304,12 +443,13 @@ class AttentionFeatureVarNetBlock(nn.Module):
 
         new_features = feature_image.features - self.compute_dc_term(feature_image)
 
-        if self.attention_layer is not None:
+        attention_layer = self._attention_for_acceleration(accel)
+        if attention_layer is not None:
             feature_image = feature_image._replace(
-                features=self.attention_layer(feature_image.features, accel)
+                features=attention_layer(feature_image.features, accel)
             )
 
-        regularization = self.feature_processor(feature_image.features)
+        regularization = self.apply_feature_processor(feature_image)
         if self.acc_film is not None:
             regularization = self._apply_acc_film(regularization, accel)
         new_features = new_features - regularization
@@ -342,16 +482,35 @@ class FIVarNet(nn.Module):
         kspace_mult_factor: float = 1e6,
         use_checkpoint: bool = True,
         use_acc_film: bool = False,
+        split_attention_cascades: Optional[List[int]] = None,
+        feature_processor: str = "norm-unet",
     ):
         super().__init__()
         if image_conv_cascades is None:
             image_conv_cascades = [i for i in range(num_cascades) if i % 3 == 0]
         if attention_cascades is None:
             attention_cascades = [0]
+        if split_attention_cascades is None:
+            split_attention_cascades = []
+        split_attention_cascades = sorted(set(split_attention_cascades))
+        invalid_split = [
+            i for i in split_attention_cascades
+            if i < 0 or i >= num_cascades or i not in attention_cascades
+        ]
+        if invalid_split:
+            raise ValueError(
+                "Every split-attention cascade must be a valid attention cascade; "
+                f"invalid indices: {invalid_split}"
+            )
 
         self.acceleration = acceleration  # fallback when mask stride detection fails
         self.kspace_mult_factor = kspace_mult_factor
         self.use_checkpoint = use_checkpoint
+        self.feature_processor_type = feature_processor
+        if feature_processor not in {"norm-unet", "paper-unet2d"}:
+            raise ValueError(
+                "feature_processor must be 'norm-unet' or 'paper-unet2d'."
+            )
 
         self.sens_net = SensitivityModel(sens_chans, sens_pools)
         self.encoder = FeatureEncoder(in_chans=2, feature_chans=chans)
@@ -364,12 +523,23 @@ class FIVarNet(nn.Module):
                 AttentionFeatureVarNetBlock(
                     encoder=self.encoder,
                     decoder=self.decoder,
-                    feature_processor=FeatureNormUnet(
-                        chans, pools, in_chans=chans, out_chans=chans
+                    feature_processor=(
+                        FeatureUnet2d(
+                            in_chans=chans,
+                            out_chans=chans,
+                            chans=32,
+                            num_pool_layers=pools,
+                            drop_prob=0.0,
+                        )
+                        if feature_processor == "paper-unet2d"
+                        else FeatureNormUnet(
+                            chans, pools, in_chans=chans, out_chans=chans
+                        )
                     ),
                     attention_layer=AttentionPE(chans) if i in attention_cascades else None,
                     use_extra_feature_conv=(i in image_conv_cascades),
                     use_acc_film=use_acc_film,
+                    split_attention=(i in split_attention_cascades),
                 )
                 for i in range(num_cascades)
             ]
@@ -404,11 +574,14 @@ class FIVarNet(nn.Module):
         if not self._checkpointing():
             return cascade(fi, accel)
 
+        crop_size = fi.crop_size
+
         def run(features, sens_maps, means, variances, mask, ref_kspace):
             out = cascade(
                 FeatureImage(
                     features=features,
                     sens_maps=sens_maps,
+                    crop_size=crop_size,
                     means=means,
                     variances=variances,
                     mask=mask,
@@ -448,9 +621,15 @@ class FIVarNet(nn.Module):
 
         image = sens_reduce(masked_kspace, sens_maps)
         means, variances = self.norm_fn(image)
+        if self.feature_processor_type == "paper-unet2d" and crop_size is None:
+            crop_size = (384, 384)
+        if crop_size is not None and image.shape[-1] < crop_size[1]:
+            # Paper-linked code special-cases narrow FLAIR acquisitions.
+            crop_size = (image.shape[-1], image.shape[-1])
         feature_image = FeatureImage(
             features=self.encoder(image, means, variances),
             sens_maps=sens_maps,
+            crop_size=crop_size,
             means=means,
             variances=variances,
             mask=mask,

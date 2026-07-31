@@ -142,5 +142,11 @@ Leaderboard Recon Time : 193.96s (87.6 ms/slice)
 | --- | --- | --- | --- |
 | 001 | Baby VarNet baseline (`c1/ch9/s4`, 5 epochs) | Complete | [`reports/test_Varnet`](reports/test_Varnet) |
 | 002 | Long VarNet (`c6/ch12/s4`, 80 epochs) | Ready to run | [`experiments/002_varnet_c6_long`](experiments/002_varnet_c6_long) |
+| 006 | Paper-aligned FI-VarNet (`6+6`) | Implemented | [`experiments/006_fivarnet_paper`](experiments/006_fivarnet_paper) |
+| 007 | Final FI-VarNet (`6+6`) + MRAugment, train+val | Ready to run | [`experiments/007_fivarnet_mraugment`](experiments/007_fivarnet_mraugment) |
 
 Experiment 002 includes a VESSL entrypoint, automatic checkpoint resume, GPU telemetry, training plots, challenge-aligned validation metrics, and a lightweight result export workflow. See its experiment README for the copy-paste VESSL command and operational checklist.
+
+The final submission workflow is experiment 007. It attempts 100 deterministic
+epochs and keeps every latest completed epoch submission-ready, so the run can
+be stopped early when the allocation expires.
