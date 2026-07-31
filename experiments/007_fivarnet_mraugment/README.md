@@ -1,11 +1,19 @@
-# Experiment 007: FI-VarNet 6+6 with MRAugment
+# Final submission: FI-VarNet 6+6 with MRAugment
 
-This experiment adds the fastMRI MRAugment profile from Fabian et al.,
+This final training configuration adds the fastMRI MRAugment profile from Fabian et al.,
 *Data augmentation for deep learning based accelerated MRI reconstruction
-with limited data* (ICML 2021), to experiment 006. The model, optimizer,
-210,000 optimizer-update safety ceiling, and objective remain unchanged. The
-run now has an explicit 100-epoch hard cap and can be resumed from the
-epoch-boundary `model.pt` checkpoint.
+with limited data* (ICML 2021), to the final FI-VarNet. This is a submission
+training profile, not a fixed-step reproduction experiment:
+
+- training runs for 100 complete epochs;
+- `model.pt` is saved at every epoch boundary for resume;
+- validation is run every epoch;
+- `best_model.pt` tracks the best challenge final score.
+
+The FI learning-rate shape is retained without a fixed step count. After the
+loader size is known, the 100-epoch optimizer-step horizon is calculated and
+the original relative phases are mapped onto it: 3.57% warm-up, plateau until
+71.43%, then quarter-cosine decay.
 
 ## Paper-aligned augmentation
 
@@ -30,9 +38,7 @@ The base probability uses the paper's normalized exponential schedule:
 
 `p(t) = 0.55 * (1 - exp(-5 * t/T)) / (1 - exp(-5))`.
 
-For this experiment, `T=100`, unless the 210k optimizer-update safety ceiling
-would finish earlier. This preserves the paper's epoch-normalized curve over
-the actual configured run.
+For this final run, `T=100`.
 
 ## Deliberate project-specific decisions
 
@@ -54,10 +60,10 @@ the actual configured run.
 4. Augmentation and mask RNGs are derived from seed, epoch, filename, and
    slice (mask offset excludes slice). This is reproducible across worker
    counts and resumed runs, unlike mutable per-worker RNG state.
-5. Training stops at the first of 100 epochs or 210k optimizer updates. The
-   100-epoch cap makes intentional interruption/resume practical while the
-   original FI safety ceiling prevents an unexpectedly large dataset from
-   exceeding the paper-aligned update budget.
+5. The final model is selected on held-out validation, so train and validation
+   are not combined. This avoids selecting a checkpoint on data used to update
+   the model. A later train+validation refit would require a separately fixed
+   epoch chosen before that refit.
 
 Run with:
 

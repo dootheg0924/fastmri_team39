@@ -208,6 +208,8 @@ if [[ "${RUN_SMOKE_TEST}" == "1" ]]; then
   fi
   if [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-paper" ]]; then
     SMOKE_EXTRA_ARGS+=(--paper-training)
+  elif [[ "${TRAINING_PRESET:-legacy}" == "fi-varnet-final" ]]; then
+    SMOKE_EXTRA_ARGS+=(--final-training)
   fi
   if [[ -n "${SPLIT_ATTENTION_CASCADES:-}" ]]; then
     # shellcheck disable=SC2206

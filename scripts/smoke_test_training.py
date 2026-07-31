@@ -124,6 +124,11 @@ def main():
         help="Use paper AdamW/scheduler/clipping with the configured "
              "exp/003 bbox-aware SSIM objective",
     )
+    parser.add_argument(
+        "--final-training",
+        action="store_true",
+        help="Use final-run AdamW/clipping without a fixed-step scheduler",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -182,7 +187,7 @@ def main():
         split_attention_cascades=args.split_attention_cascades,
     )
     model = build_model(model_args).to(device=device)
-    if args.paper_training:
+    if args.paper_training or args.final_training:
         torch.set_float32_matmul_precision("high")
         optimization_args = SimpleNamespace(
             lr=3e-4,
@@ -192,8 +197,10 @@ def main():
             adam_beta2=0.999,
             adam_eps=1e-8,
             adam_amsgrad=False,
-            lr_scheduler="fi-varnet-paper",
-            max_steps=210_000,
+            lr_scheduler=(
+                "fi-varnet-paper" if args.paper_training else "none"
+            ),
+            max_steps=210_000 if args.paper_training else None,
             lr_warmup_steps=7_500,
             lr_cosine_start_step=150_000,
             lr_min_factor=1e-8,
@@ -242,7 +249,7 @@ def main():
                 raise RuntimeError(
                     f"Cascade {cascade_index} inactive attention expert received a gradient."
                 )
-    if args.paper_training:
+    if args.paper_training or args.final_training:
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     if scheduler is not None:

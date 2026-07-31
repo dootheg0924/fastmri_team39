@@ -9,7 +9,11 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from scripts.smoke_test_training import _select_stress_slice
-from train import PAPER_FIVARNET_PRESET, apply_training_preset
+from train import (
+    FINAL_FIVARNET_PRESET,
+    PAPER_FIVARNET_PRESET,
+    apply_training_preset,
+)
 from utils.common.bbox_loss import BboxAwareSSIMLoss
 from utils.data.load_data import PaddedRandomSampler
 from utils.learning.train_part import (
@@ -18,6 +22,7 @@ from utils.learning.train_part import (
     build_optimizer,
     build_training_loss,
     checkpoint_decision,
+    configure_epoch_lr_schedule,
     load_checkpoint,
     paper_lr_multiplier,
     save_model,
@@ -93,6 +98,43 @@ def test_paper_preset_preserves_explicit_data_split_protocol():
 
     assert args.combine_train_val is True  # released brain leaderboard runner
     assert args.checkpoint_metric == "paper-ssim"
+
+
+def test_final_preset_uses_epochs_and_best_challenge_checkpoint():
+    args = apply_training_preset(
+        Namespace(
+            training_preset=FINAL_FIVARNET_PRESET,
+            combine_train_val=False,
+            checkpoint_metric=None,
+            num_epochs=100,
+        )
+    )
+
+    assert args.max_steps is None
+    assert args.lr_scheduler == "fi-varnet-epochs"
+    assert args.checkpoint_metric == "challenge-final"
+    assert args.num_epochs == 100
+    assert args.model_name == "fivarnet"
+    assert args.cascade == args.image_cascades == 6
+    assert args.loss_name == "bbox-aware-ssim"
+    assert args.bbox_loss_weight == pytest.approx(0.5)
+
+
+def test_epoch_lr_schedule_preserves_paper_phase_ratios():
+    args = Namespace(
+        lr_scheduler="fi-varnet-epochs",
+        gradient_accumulation_steps=4,
+        num_epochs=100,
+    )
+    resolved = configure_epoch_lr_schedule(args, loader_length=400)
+
+    assert resolved["steps_per_epoch"] == 100
+    assert resolved["total_steps"] == 10_000
+    assert resolved["warmup_steps"] == round(10_000 * 7_500 / 210_000)
+    assert resolved["cosine_start_step"] == round(
+        10_000 * 150_000 / 210_000
+    )
+    assert args.lr_total_steps == 10_000
 
 
 def test_exp003_bbox_objective_uses_requested_half_weight(monkeypatch):

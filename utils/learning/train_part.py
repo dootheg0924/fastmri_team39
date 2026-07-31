@@ -136,12 +136,17 @@ def build_lr_scheduler(args, optimizer):
     scheduler_name = getattr(args, 'lr_scheduler', 'none')
     if scheduler_name == 'none':
         return None
-    if scheduler_name != 'fi-varnet-paper':
+    if scheduler_name not in {'fi-varnet-paper', 'fi-varnet-epochs'}:
         raise ValueError(f'Unknown LR scheduler: {scheduler_name}')
 
-    max_steps = getattr(args, 'max_steps', None)
-    if max_steps is None:
-        raise ValueError('The FI-VarNet paper scheduler requires --max-steps.')
+    if scheduler_name == 'fi-varnet-epochs':
+        schedule_steps = getattr(args, 'lr_total_steps', None)
+    else:
+        schedule_steps = getattr(args, 'max_steps', None)
+    if schedule_steps is None:
+        raise ValueError(
+            f'{scheduler_name} requires its total optimizer-step horizon.'
+        )
 
     def step_fn(step):
         return paper_lr_multiplier(
@@ -149,11 +154,43 @@ def build_lr_scheduler(args, optimizer):
             base_lr=args.lr,
             warmup_steps=getattr(args, 'lr_warmup_steps', 7500),
             cosine_start_step=getattr(args, 'lr_cosine_start_step', 150000),
-            max_steps=max_steps,
+            max_steps=schedule_steps,
             min_factor=getattr(args, 'lr_min_factor', 1e-8),
         )
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, step_fn)
+
+
+def configure_epoch_lr_schedule(args, loader_length):
+    """Scale the FI LR phases to an epoch-defined final-training run."""
+    if getattr(args, 'lr_scheduler', 'none') != 'fi-varnet-epochs':
+        return None
+    accumulation_steps = int(
+        getattr(args, 'gradient_accumulation_steps', 1)
+    )
+    if accumulation_steps <= 0 or loader_length % accumulation_steps != 0:
+        raise ValueError(
+            'Epoch LR scheduling requires complete optimizer-step boundaries.'
+        )
+    steps_per_epoch = int(loader_length) // accumulation_steps
+    total_steps = int(args.num_epochs) * steps_per_epoch
+    if total_steps < 3:
+        raise ValueError('Epoch LR scheduling requires at least three updates.')
+
+    # Preserve the released FI schedule's relative phases while allowing the
+    # final run length to be selected in epochs rather than a fixed step cap.
+    args.lr_total_steps = total_steps
+    args.lr_warmup_steps = max(1, round(total_steps * 7_500 / 210_000))
+    args.lr_cosine_start_step = max(
+        args.lr_warmup_steps,
+        min(total_steps - 1, round(total_steps * 150_000 / 210_000)),
+    )
+    return {
+        'steps_per_epoch': steps_per_epoch,
+        'total_steps': total_steps,
+        'warmup_steps': args.lr_warmup_steps,
+        'cosine_start_step': args.lr_cosine_start_step,
+    }
 
 
 def train_epoch(
@@ -841,6 +878,67 @@ def train(args):
             'because FI-VarNet infers one acceleration per batch.'
         )
 
+    train_paths = [args.data_path_train]
+    if getattr(args, 'combine_train_val', False):
+        train_paths.append(args.data_path_val)
+        print(
+            'Training on train + validation splits; validation is still '
+            'evaluated separately.'
+        )
+    train_loader = create_data_loaders(
+        data_path=train_paths,
+        args=args,
+        shuffle=True,
+    )
+    val_loader = create_data_loaders(
+        data_path=args.data_path_val, args=args
+    )
+    lr_schedule = configure_epoch_lr_schedule(args, len(train_loader))
+    if lr_schedule is not None:
+        print(
+            'Final epoch LR schedule: '
+            f'epochs={args.num_epochs}, '
+            f'steps_per_epoch={lr_schedule["steps_per_epoch"]}, '
+            f'total_steps={lr_schedule["total_steps"]}, '
+            f'warmup_steps={lr_schedule["warmup_steps"]}, '
+            f'cosine_start_step={lr_schedule["cosine_start_step"]}.'
+        )
+    if getattr(args, 'mraugment', False):
+        accumulation_steps = int(
+            getattr(args, 'gradient_accumulation_steps', 1)
+        )
+        if len(train_loader) % accumulation_steps != 0:
+            raise ValueError(
+                'MRAugment scheduling requires a complete optimizer-step '
+                'boundary at every epoch.'
+            )
+        steps_per_epoch = len(train_loader) // accumulation_steps
+        max_steps = getattr(args, 'max_steps', None)
+        args.mraugment_total_epochs = (
+            math.ceil(max_steps / steps_per_epoch)
+            if max_steps is not None
+            else int(args.num_epochs)
+        )
+        max_training_epochs = getattr(args, 'max_training_epochs', None)
+        if max_training_epochs is not None:
+            args.mraugment_total_epochs = min(
+                args.mraugment_total_epochs, int(max_training_epochs)
+            )
+        if args.mraugment_total_epochs <= getattr(
+            args, 'mraugment_delay_epochs', 0
+        ):
+            raise ValueError(
+                'MRAugment total schedule epochs must exceed its delay.'
+            )
+        print(
+            'MRAugment schedule: '
+            f'{args.mraugment_schedule}, '
+            f'p_max={args.mraugment_strength:g}, '
+            f'decay={args.mraugment_exp_decay:g}, '
+            f'total_epochs={args.mraugment_total_epochs}, '
+            f'steps_per_epoch={steps_per_epoch}.'
+        )
+
     model = build_model(args)
     model.to(device=device)
 
@@ -896,54 +994,6 @@ def train(args):
     elif args.resume:
         print(f'No checkpoint found at {checkpoint_path}; starting a new run.')
 
-    train_paths = [args.data_path_train]
-    if getattr(args, 'combine_train_val', False):
-        train_paths.append(args.data_path_val)
-        print(
-            'Paper data protocol: training on train + validation splits; '
-            'validation is still evaluated separately.'
-        )
-    train_loader = create_data_loaders(
-        data_path=train_paths,
-        args=args,
-        shuffle=True,
-    )
-    val_loader = create_data_loaders(data_path = args.data_path_val, args = args)
-    if getattr(args, 'mraugment', False):
-        accumulation_steps = int(
-            getattr(args, 'gradient_accumulation_steps', 1)
-        )
-        if len(train_loader) % accumulation_steps != 0:
-            raise ValueError(
-                'MRAugment scheduling requires a complete optimizer-step '
-                'boundary at every epoch.'
-            )
-        steps_per_epoch = len(train_loader) // accumulation_steps
-        max_steps = getattr(args, 'max_steps', None)
-        args.mraugment_total_epochs = (
-            math.ceil(max_steps / steps_per_epoch)
-            if max_steps is not None
-            else int(args.num_epochs)
-        )
-        max_training_epochs = getattr(args, 'max_training_epochs', None)
-        if max_training_epochs is not None:
-            args.mraugment_total_epochs = min(
-                args.mraugment_total_epochs, int(max_training_epochs)
-            )
-        if args.mraugment_total_epochs <= getattr(
-            args, 'mraugment_delay_epochs', 0
-        ):
-            raise ValueError(
-                'MRAugment total schedule epochs must exceed its delay.'
-            )
-        print(
-            'MRAugment schedule: '
-            f'{args.mraugment_schedule}, '
-            f'p_max={args.mraugment_strength:g}, '
-            f'decay={args.mraugment_exp_decay:g}, '
-            f'total_epochs={args.mraugment_total_epochs}, '
-            f'steps_per_epoch={steps_per_epoch}.'
-        )
     write_run_metadata(args, device)
     if hasattr(train_loader.sampler, 'summary'):
         summary = train_loader.sampler.summary()

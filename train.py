@@ -14,6 +14,7 @@ from utils.common.utils import seed_fix  # noqa: E402
 
 
 PAPER_FIVARNET_PRESET = 'fi-varnet-paper'
+FINAL_FIVARNET_PRESET = 'fi-varnet-final'
 
 
 def apply_training_preset(args):
@@ -25,7 +26,10 @@ def apply_training_preset(args):
     callers cannot accidentally combine the architecture with a different
     optimizer, loss, or stopping rule.
     """
-    if args.training_preset != PAPER_FIVARNET_PRESET:
+    if args.training_preset not in {
+        PAPER_FIVARNET_PRESET,
+        FINAL_FIVARNET_PRESET,
+    }:
         if getattr(args, 'checkpoint_metric', None) is None:
             args.checkpoint_metric = 'challenge-final'
         return args
@@ -62,11 +66,17 @@ def apply_training_preset(args):
         # (1 - foreground SSIM) + 0.5 * mean(1 - bbox SSIM).
         'loss_name': 'bbox-aware-ssim',
         'bbox_loss_weight': 0.5,
-        'lr_scheduler': 'fi-varnet-paper',
-        'max_steps': 210_000,
+        'lr_scheduler': (
+            'fi-varnet-epochs'
+            if args.training_preset == FINAL_FIVARNET_PRESET
+            else 'fi-varnet-paper'
+        ),
+        'max_steps': (
+            None
+            if args.training_preset == FINAL_FIVARNET_PRESET
+            else 210_000
+        ),
         'lr_warmup_steps': 7_500,
-        # The authors' released implementation uses 150k; the paper describes
-        # the preceding 140k-step plateau approximately.
         'lr_cosine_start_step': 150_000,
         'lr_min_factor': 1e-8,
         'gradient_clip_val': 1.0,
@@ -85,11 +95,14 @@ def apply_training_preset(args):
         'deterministic': False,
         'float32_matmul_precision': 'high',
     }
-    # Model selection is a data protocol rather than an optimizer
-    # hyperparameter. The knee paper skipped validation and used the final
-    # 210k-step weights; the released brain runner monitored validation SSIM.
+    # The paper preset reproduces final-step selection. The submission preset
+    # evaluates every epoch and promotes the best challenge score.
     if getattr(args, 'checkpoint_metric', None) is None:
-        overrides['checkpoint_metric'] = 'paper-final'
+        overrides['checkpoint_metric'] = (
+            'challenge-final'
+            if args.training_preset == FINAL_FIVARNET_PRESET
+            else 'paper-final'
+        )
 
     for name, value in overrides.items():
         setattr(args, name, value)
@@ -207,10 +220,10 @@ def parse():
     )
     parser.add_argument(
         '--training-preset',
-        choices=['legacy', PAPER_FIVARNET_PRESET],
+        choices=['legacy', PAPER_FIVARNET_PRESET, FINAL_FIVARNET_PRESET],
         default='legacy',
-        help='Atomic FI-VarNet preset: paper 6+6 architecture adapted for '
-             'GTX 1080 checkpointing and the exp/003 bbox-aware objective',
+        help='Atomic FI-VarNet presets: paper reproduces the fixed-step run; '
+             'final trains for num_epochs and selects the best challenge score',
     )
     parser.add_argument('--optimizer', choices=['adam', 'adamw'], default='adam',
                         help='Optimizer used for reconstruction training')
@@ -222,7 +235,7 @@ def parse():
     parser.add_argument('--adam-amsgrad', action='store_true')
     parser.add_argument(
         '--lr-scheduler',
-        choices=['none', 'fi-varnet-paper'],
+        choices=['none', 'fi-varnet-paper', 'fi-varnet-epochs'],
         default='none',
         help='Per-optimizer-step learning-rate schedule',
     )
