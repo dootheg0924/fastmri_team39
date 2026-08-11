@@ -11,6 +11,8 @@ from utils.data.mraugment import (
     infer_acquired_column_bounds,
     infer_equispaced_mask,
     make_equispaced_mask,
+    resample_acceleration,
+    retarget_specification,
     sample_parameters,
     transform_boxes,
 )
@@ -63,6 +65,7 @@ class DataTransform:
         self.is_train = bool(is_train)
         self.epoch = 0
         self._mask_specifications = {}
+        self._mask_catalog = {}
 
     @property
     def mraugment_enabled(self):
@@ -72,8 +75,25 @@ class DataTransform:
             and bool(getattr(self.args, "mraugment", False))
         )
 
+    @property
+    def cross_acceleration_enabled(self):
+        return (
+            self.is_train
+            and not self.isforward
+            and float(getattr(self.args, "cross_acceleration", 0.0) or 0.0) > 0.0
+        )
+
+    @property
+    def resampling_enabled(self):
+        """Whether this sample's mask is regenerated from complete k-space."""
+        return self.mraugment_enabled or self.cross_acceleration_enabled
+
     def set_epoch(self, epoch):
         self.epoch = int(epoch)
+
+    def set_mask_catalog(self, catalog):
+        """Record the dataset's own ACS width per acceleration (see load_data)."""
+        self._mask_catalog = dict(catalog or {})
 
     def augmentation_probability(self):
         if not self.mraugment_enabled:
@@ -101,7 +121,7 @@ class DataTransform:
 
         kspace_input = np.asarray(input, dtype=np.complex64)
         applied_mask = np.asarray(mask).astype(bool).reshape(-1)
-        if self.mraugment_enabled:
+        if self.resampling_enabled:
             source_width = kspace_input.shape[-1]
             acquired_left, acquired_right = infer_acquired_column_bounds(
                 kspace_input
@@ -110,12 +130,14 @@ class DataTransform:
             if specification is None:
                 specification = infer_equispaced_mask(applied_mask)
                 self._mask_specifications[fname] = specification
-            probability = self.augmentation_probability()
             seed = getattr(
                 self.args,
                 "mraugment_seed",
                 getattr(self.args, "seed", 42),
             )
+
+        if self.mraugment_enabled:
+            probability = self.augmentation_probability()
             augmentation_rng = deterministic_rng(
                 seed, self.epoch, fname, slice, purpose="augment"
             )
@@ -147,9 +169,32 @@ class DataTransform:
                 np.asarray(transformed_boxes, dtype=np.float32).reshape(-1, 4)
             )
 
-            # The source data contains complete k-space. Generate a valid mask
-            # after augmentation, retaining its R and ACS fraction. The offset
-            # varies by volume and epoch but is shared by all volume slices.
+        if self.resampling_enabled:
+            # The label is RSS of the complete k-space, so it does not depend on
+            # the mask. A volume may therefore stand in for the other
+            # acceleration, which pools both groups into one acc8 source set.
+            # Drawn per volume and epoch, on its own RNG stream so that enabling
+            # this leaves the geometry and offset draws of a resumed run intact.
+            if self.cross_acceleration_enabled:
+                acceleration_rng = deterministic_rng(
+                    seed, self.epoch, fname, purpose="cross-acceleration"
+                )
+                drawn = resample_acceleration(
+                    acceleration_rng,
+                    float(getattr(self.args, "cross_acceleration", 0.0)),
+                    float(getattr(self.args, "cross_acceleration_p8", 0.5)),
+                )
+                if drawn is not None:
+                    specification = retarget_specification(
+                        specification,
+                        drawn,
+                        kspace_input.shape[-1],
+                        catalog=self._mask_catalog,
+                    )
+
+            # Generate a valid mask after augmentation, retaining the ACS
+            # fraction. The offset varies by volume and epoch but is shared by
+            # all volume slices.
             mask_rng = deterministic_rng(
                 seed, self.epoch, fname, purpose="mask"
             )

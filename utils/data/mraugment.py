@@ -184,6 +184,49 @@ def infer_equispaced_mask(mask, accelerations=(4, 8)):
     )
 
 
+def resample_acceleration(rng, probability, high_probability, low=4, high=8):
+    """Draw a volume-epoch acceleration, or ``None`` to keep the stored one.
+
+    Because the stored k-space is complete and ``image_label`` is its RSS, the
+    label does not depend on which mask is applied. Any volume can therefore be
+    re-undersampled at the other acceleration and remain a valid training pair,
+    which pools both acceleration groups into one acc8 (and acc4) source set.
+    """
+    if probability <= 0.0:
+        return None
+    if rng.random() >= probability:
+        return None
+    return int(high) if rng.random() < high_probability else int(low)
+
+
+def retarget_specification(specification, acceleration, width, catalog=None):
+    """Re-express ``specification`` at another acceleration for a given width.
+
+    The challenge ships a slightly different ACS width per acceleration (the
+    sample volumes carry 29/368 at R4 and 31/372 at R8), so a re-targeted mask
+    should adopt the destination acceleration's own centre fraction. ``catalog``
+    supplies it when the dataset has been scanned; otherwise the source volume's
+    centre fraction is kept, which differs by at most a couple of lines.
+
+    ``offset`` is zeroed because the caller always redraws it.
+    """
+    acceleration = int(acceleration)
+    if acceleration == int(specification.acceleration):
+        return specification
+    reference = (catalog or {}).get(acceleration)
+    center_fraction = (
+        specification.center_fraction if reference is None
+        else reference.center_fraction
+    )
+    num_low = max(1, min(int(width), int(round(center_fraction * int(width)))))
+    return MaskSpecification(
+        acceleration=acceleration,
+        offset=0,
+        center_fraction=center_fraction,
+        num_low_frequencies=num_low,
+    )
+
+
 def fft2c(image):
     return np.fft.fftshift(
         np.fft.fft2(np.fft.ifftshift(image, axes=(-2, -1)), norm="ortho"),

@@ -107,6 +107,8 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'MRAUGMENT_DELAY_EPOCHS=%q\n' "${MRAUGMENT_DELAY_EPOCHS:-0}"
   printf 'MRAUGMENT_SEED=%q\n' "${MRAUGMENT_SEED:-42}"
   printf 'MRAUGMENT_MIN_BBOX_SIZE=%q\n' "${MRAUGMENT_MIN_BBOX_SIZE:-7}"
+  printf 'CROSS_ACCELERATION=%q\n' "${CROSS_ACCELERATION:-0}"
+  printf 'CROSS_ACCELERATION_P8=%q\n' "${CROSS_ACCELERATION_P8:-0.5}"
   printf 'TRAINING_TIME_BUDGET_HOURS=%q\n' "${TRAINING_TIME_BUDGET_HOURS:-}"
   printf 'TRAINING_TIME_RESERVE_FRACTION=%q\n' "${TRAINING_TIME_RESERVE_FRACTION:-0.05}"
   printf 'TRAINING_TIME_PROBE_EPOCHS=%q\n' "${TRAINING_TIME_PROBE_EPOCHS:-2}"
@@ -121,6 +123,8 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'NUM_WORKERS=%q\n' "${NUM_WORKERS}"
   printf 'PIN_MEMORY=%q\n' "${PIN_MEMORY}"
   printf 'CHECKPOINT_INTERVAL=%q\n' "${CHECKPOINT_INTERVAL}"
+  printf 'CHECKPOINT_EPOCHS=%q\n' "${CHECKPOINT_EPOCHS:-}"
+  printf 'EXPECTED_RESUME_EPOCH=%q\n' "${EXPECTED_RESUME_EPOCH:-}"
   printf 'GPU_SAMPLE_INTERVAL=%q\n' "${GPU_SAMPLE_INTERVAL}"
   printf 'RUN_SMOKE_TEST=%q\n' "${RUN_SMOKE_TEST}"
   printf 'RUN_VALIDATION_ANALYSIS=%q\n' "${RUN_VALIDATION_ANALYSIS}"
@@ -355,6 +359,21 @@ if [[ "${MRAUGMENT:-0}" == "1" ]]; then
   )
 else
   TRAIN_ARGS+=(--no-mraugment)
+fi
+if [[ -n "${EXPECTED_RESUME_EPOCH:-}" ]]; then
+  TRAIN_ARGS+=(--expected-resume-epoch "${EXPECTED_RESUME_EPOCH}")
+fi
+if [[ -n "${CHECKPOINT_EPOCHS:-}" ]]; then
+  # Word-split on purpose: CHECKPOINT_EPOCHS is a space-separated epoch list.
+  # shellcheck disable=SC2206
+  CHECKPOINT_EPOCH_LIST=(${CHECKPOINT_EPOCHS})
+  TRAIN_ARGS+=(--checkpoint-epochs "${CHECKPOINT_EPOCH_LIST[@]}")
+fi
+if [[ "${CROSS_ACCELERATION:-0}" != "0" ]]; then
+  TRAIN_ARGS+=(
+    --cross-acceleration "${CROSS_ACCELERATION}"
+    --cross-acceleration-p8 "${CROSS_ACCELERATION_P8:-0.5}"
+  )
 fi
 
 echo "Training command: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} ${TRAIN_ARGS[*]}"

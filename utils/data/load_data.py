@@ -1,4 +1,6 @@
 import h5py
+from collections import Counter
+from utils.data.mraugment import MaskSpecification, infer_equispaced_mask
 from utils.data.transforms import DataTransform
 import re
 import torch
@@ -217,6 +219,57 @@ class SliceData(Dataset):
         return self.transform(mask, input, target, attrs, kspace_fname.name, dataslice)
 
 
+def scan_mask_specifications(datasets):
+    """Catalogue the dataset's own mask geometry, one entry per acceleration.
+
+    Cross-acceleration re-masking needs the destination acceleration's ACS
+    width, which the challenge sets differently for acc4 and acc8 volumes. The
+    scan reads only the small 1-D ``mask`` of every distinct volume, so it costs
+    one metadata-sized H5 open per file and is exact rather than assumed.
+
+    Returns ``{acceleration: MaskSpecification}`` using the most common geometry
+    observed for that acceleration, plus a per-acceleration volume count.
+    """
+    observed = Counter()
+    seen = set()
+    for dataset in datasets:
+        for path, _ in dataset.kspace_examples:
+            if path in seen:
+                continue
+            seen.add(path)
+            with h5py.File(path, "r") as hf:
+                mask = np.array(hf["mask"])
+            specification = infer_equispaced_mask(mask)
+            observed[(
+                specification.acceleration,
+                specification.center_fraction,
+                specification.num_low_frequencies,
+            )] += 1
+
+    catalog = {}
+    counts = Counter()
+    # Sorted so that a tie between two equally common geometries always resolves
+    # the same way: the catalogue feeds every re-targeted mask, so it has to be
+    # a pure function of the dataset, not of iteration order.
+    for (acceleration, center_fraction, num_low), count in sorted(observed.items()):
+        counts[acceleration] += count
+        best = catalog.get(acceleration)
+        if best is None or count > best[0]:
+            catalog[acceleration] = (count, center_fraction, num_low)
+    return (
+        {
+            acceleration: MaskSpecification(
+                acceleration=acceleration,
+                offset=0,
+                center_fraction=center_fraction,
+                num_low_frequencies=num_low,
+            )
+            for acceleration, (_, center_fraction, num_low) in catalog.items()
+        },
+        dict(counts),
+    )
+
+
 def create_data_loaders(data_path, args, shuffle=False, isforward=False):
     is_train = bool(shuffle and not isforward)
     if not isforward:
@@ -243,6 +296,27 @@ def create_data_loaders(data_path, args, shuffle=False, isforward=False):
         for path in data_paths
     ]
     data_storage = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+
+    if is_train and float(getattr(args, "cross_acceleration", 0.0) or 0.0) > 0.0:
+        # Scanned once in the parent process so every worker inherits the same
+        # catalogue; deriving it lazily per worker would make the ACS width of a
+        # re-targeted mask depend on which volumes a worker happened to see.
+        catalog, counts = scan_mask_specifications(datasets)
+        missing = {4, 8} - set(catalog)
+        if missing:
+            raise ValueError(
+                "Cross-acceleration re-masking needs both R4 and R8 volumes in "
+                f"the training set to copy their ACS widths; missing: {sorted(missing)}."
+            )
+        for dataset in datasets:
+            dataset.transform.set_mask_catalog(catalog)
+        summary = ", ".join(
+            f"R{acceleration}: {counts[acceleration]} volumes, "
+            f"ACS {catalog[acceleration].num_low_frequencies} lines "
+            f"({catalog[acceleration].center_fraction:.4f})"
+            for acceleration in sorted(catalog)
+        )
+        print(f"Cross-acceleration mask catalogue -> {summary}")
 
     sampler = None
     if shuffle and getattr(args, "balance_accelerations", False):

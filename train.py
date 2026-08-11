@@ -144,10 +144,27 @@ def parse():
         help='When warm-starting, train for this many epochs after the source checkpoint epoch',
     )
     parser.add_argument(
+        '--expected-resume-epoch',
+        type=int,
+        default=None,
+        help='Fail unless the resumed model.pt has at least this many completed '
+             'epochs. Guards a staged run against silently continuing from the '
+             'wrong stage-one checkpoint',
+    )
+    parser.add_argument(
         '--expected-warm-start-epoch',
         type=int,
         default=None,
         help='Fail unless the warm-start checkpoint has this completed epoch count',
+    )
+    parser.add_argument(
+        '--checkpoint-epochs',
+        type=int,
+        nargs='*',
+        default=[],
+        help='Also keep a standalone checkpoint_epoch_XXXX.pt after each of these '
+             'epochs. Snapshots are copies taken alongside model.pt and never '
+             'replace best_model.pt, so a submission checkpoint is unaffected',
     )
     parser.add_argument('--checkpoint-interval', type=int, default=0,
                         help='Keep an epoch snapshot every N epochs; 0 disables snapshots')
@@ -225,6 +242,22 @@ def parse():
         type=int,
         default=7,
         help='Cancel sample geometry if an augmented box is smaller than this',
+    )
+    parser.add_argument(
+        '--cross-acceleration',
+        type=float,
+        default=0.0,
+        help='Probability that a volume-epoch is re-undersampled at a drawn '
+             'acceleration instead of its stored one. The label is RSS of the '
+             'complete k-space and does not depend on the mask, so this pools '
+             'the R4 and R8 volumes into a single source set for both. '
+             '0 disables it',
+    )
+    parser.add_argument(
+        '--cross-acceleration-p8',
+        type=float,
+        default=0.5,
+        help='P(R8) when --cross-acceleration draws an acceleration',
     )
     parser.add_argument(
         '--training-preset',

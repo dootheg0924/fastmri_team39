@@ -2,6 +2,7 @@ import shutil
 import copy
 import csv
 import gc
+import hashlib
 import json
 import math
 import numpy as np
@@ -547,6 +548,21 @@ def save_val_loss_log(history, out_path):
     os.replace(tmp_path, out_path)
 
 
+def checkpoint_digest(path, chunk_size=1 << 20):
+    """SHA-256 of a checkpoint file.
+
+    Recorded in the warm-start metadata so a rerun can prove it continued from
+    the same weights. The rule book requires the leaderboard score to reproduce
+    to four decimals from the submitted README, and a two-stage run only
+    reproduces if stage two starts from the identical stage-one checkpoint.
+    """
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def save_model(
     args,
     exp_dir,
@@ -585,7 +601,12 @@ def save_model(
         _atomic_promote_checkpoint(
             model_path, exp_dir / 'best_model.pt'
         )
-    if args.checkpoint_interval > 0 and epoch % args.checkpoint_interval == 0:
+    # Standalone snapshots. Taken as copies of the freshly written model.pt and
+    # never promoted, so `best_model.pt` keeps whatever the checkpoint metric
+    # selected -- under `submission-latest` that is still the latest epoch.
+    interval = args.checkpoint_interval
+    requested = {int(item) for item in (getattr(args, 'checkpoint_epochs', None) or ())}
+    if (interval > 0 and epoch % interval == 0) or epoch in requested:
         snapshot_path = exp_dir / f'checkpoint_epoch_{epoch:04d}.pt'
         snapshot_tmp = snapshot_path.with_suffix('.pt.tmp')
         shutil.copyfile(model_path, snapshot_tmp)
@@ -921,8 +942,10 @@ def train(args):
             )
         inherited = inherit_warm_start_args(args, warm_start_checkpoint['args'])
         args.num_epochs = source_epoch + additional_epochs
+        source_digest = checkpoint_digest(warm_start_path)
         args.warm_start_metadata = {
             'source_checkpoint': str(warm_start_path.resolve()),
+            'source_checkpoint_sha256': source_digest,
             'source_epoch': source_epoch,
             'additional_epochs': additional_epochs,
             'inherited_argument_overrides': inherited,
@@ -931,6 +954,7 @@ def train(args):
             f'Preparing warm-start from {warm_start_path} at epoch {source_epoch}; '
             f'target epoch: {args.num_epochs}.'
         )
+        print(f'Warm-start checkpoint sha256: {source_digest}')
         if inherited:
             print('Using checkpoint model/loss arguments instead of conflicting CLI values:')
             for name, values in inherited.items():
@@ -1046,6 +1070,10 @@ def train(args):
     history = []
 
     if resume_existing:
+        # Fingerprint before loading: a staged run only reproduces if stage two
+        # starts from the identical stage-one weights, and the rule book judges
+        # reproducibility from the submitted README.
+        resume_digest = checkpoint_digest(checkpoint_path)
         (
             start_epoch,
             global_step,
@@ -1056,10 +1084,31 @@ def train(args):
         ) = load_checkpoint(
             checkpoint_path, model, optimizer, device, scheduler=scheduler
         )
+        expected_resume = getattr(args, 'expected_resume_epoch', None)
+        if expected_resume is not None:
+            if start_epoch < expected_resume:
+                raise ValueError(
+                    f'Expected to resume at epoch {expected_resume} or later, but '
+                    f'{checkpoint_path} stores epoch {start_epoch}. Copy the '
+                    'intended stage-one checkpoint into this experiment first.'
+                )
+            if start_epoch > expected_resume:
+                print(
+                    f'Note: resuming at epoch {start_epoch}, past the staged '
+                    f'start of {expected_resume}. This is expected after an '
+                    'interruption; verify the sha256 below otherwise.'
+                )
+        args.resume_metadata = {
+            'resume_checkpoint': str(Path(checkpoint_path).resolve()),
+            'resume_checkpoint_sha256': resume_digest,
+            'resume_epoch': int(start_epoch),
+            'expected_resume_epoch': expected_resume,
+        }
         if warm_start_metadata is not None:
             args.warm_start_metadata = warm_start_metadata
         print(f'Resumed from {checkpoint_path} at epoch {start_epoch}; '
               f'global step {global_step}; best val loss: {best_val_loss:.6f}')
+        print(f'Resume checkpoint sha256: {resume_digest}')
     elif warm_start_checkpoint is not None:
         if scheduler is not None:
             raise ValueError(
