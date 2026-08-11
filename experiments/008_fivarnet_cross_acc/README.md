@@ -51,13 +51,23 @@ vendored in this repository at `utils/model/fastmri/data/subsample.py:65-67`,
 where the acceleration and its paired centre fraction are drawn per example.
 The challenge ships one fixed mask per volume, which removed that randomization.
 
-The ACS width is not carried over from the source volume. The challenge sets a
-different ACS per acceleration (29/368 at R4, 31/372 at R8 on the sample
-volumes), so `load_data.scan_mask_specifications` reads every volume's 1-D mask
-once in the parent process and a re-targeted mask adopts the destination
-acceleration's own ACS fraction. The scan reuses 007's `infer_equispaced_mask`,
-which refuses any mask that is not an exact centered-ACS equispaced R4/R8
-pattern, and resolves ties in sorted order so it is a pure function of the data.
+The ACS width is not carried over from the source volume by assumption.
+`load_data.scan_mask_specifications` reads every volume's 1-D mask once in the
+parent process, and a re-targeted mask adopts the destination acceleration's own
+ACS fraction. The scan reuses 007's `infer_equispaced_mask`, which refuses any
+mask that is not an exact centered-ACS equispaced R4/R8 pattern, and resolves
+ties in sorted order so it is a pure function of the data.
+
+Scanned on the real training set (200 volumes, 2026-08-12), both accelerations
+turn out to share one ACS geometry:
+
+    Cross-acceleration mask catalogue -> R4: 100 volumes, ACS 29 lines (0.0788),
+                                         R8: 100 volumes, ACS 29 lines (0.0788)
+
+So re-targeting leaves the ACS essentially unchanged and only the outer stride
+moves. An earlier reading of two sample volumes suggested R8 used a wider ACS
+(31/372); that pair was not representative of the set. The startup log is the
+authority here -- check it rather than any figure quoted in this file.
 
 ## Reproducibility
 
