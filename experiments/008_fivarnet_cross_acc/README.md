@@ -117,6 +117,26 @@ sha256sum ../result/staged_checkpoints/checkpoint_epoch_0050.pt
 nobody will be watching for longer than an epoch, or to preserve several epochs
 at once. It is a convenience, not a requirement.
 
+### This run's staged checkpoint
+
+Stage one ran from 2026-08-03 to 2026-08-12 on VESSL (GTX 1080) under
+`experiments/007_fivarnet_mraugment`, and was stopped once `model.pt` reported
+50 completed epochs. That checkpoint is the boundary between the two stages:
+
+```
+file    result/staged_checkpoints/checkpoint_epoch_0050.pt
+epoch   50
+sha256  4ae5f62c343f28e25809e0b0f2fd04154a34d8144fdff9546359096ac3cf43b6
+```
+
+A reproduction runs stage one for 50 epochs and should arrive at this checkpoint;
+stage two's startup log restates the SHA-256 it actually resumed from.
+
+Stage-one epochs took about 5h20m each at this point in training (measured at
+3.52 s per micro-batch over 5,444 micro-batches). Earlier epochs were faster
+because MRAugment's probability ramps from 0, so the run's overall average
+understates the cost of later epochs.
+
 ## Stage two: launch
 
 ```bash
