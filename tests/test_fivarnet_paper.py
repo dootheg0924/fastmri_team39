@@ -481,6 +481,19 @@ def test_explicit_epoch_cap_finishes_step_based_training():
     assert promote is True
 
 
+def test_stage_stop_epoch_does_not_replace_the_schedule_horizon():
+    args = Namespace(
+        max_steps=None,
+        max_training_epochs=None,
+        stage_stop_epoch=50,
+        num_epochs=100,
+    )
+
+    assert args.num_epochs == 100
+    assert not training_limit_reached(args, 49, 0)
+    assert training_limit_reached(args, 50, 0)
+
+
 def test_optimizer_scheduler_checkpoint_round_trip(tmp_path):
     args = Namespace(
         lr=3e-4,

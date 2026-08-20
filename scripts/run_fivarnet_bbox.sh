@@ -77,6 +77,7 @@ RESOLVED_CONFIG="${EXP_DIR}/resolved_config.env"
   printf 'FINAL_NUM_EPOCHS=%q\n' "${FINAL_NUM_EPOCHS:-}"
   printf 'NUM_EPOCHS=%q\n' "${NUM_EPOCHS}"
   printf 'MAX_TRAINING_EPOCHS=%q\n' "${MAX_TRAINING_EPOCHS:-}"
+  printf 'STAGE_STOP_EPOCH=%q\n' "${STAGE_STOP_EPOCH:-}"
   printf 'LEARNING_RATE=%q\n' "${LEARNING_RATE}"
   printf 'REPORT_INTERVAL=%q\n' "${REPORT_INTERVAL}"
   printf 'SEED=%q\n' "${SEED}"
@@ -297,6 +298,9 @@ TRAIN_ARGS=(
 )
 if [[ -n "${MAX_TRAINING_EPOCHS:-}" ]]; then
   TRAIN_ARGS+=(--max-training-epochs "${MAX_TRAINING_EPOCHS}")
+fi
+if [[ -n "${STAGE_STOP_EPOCH:-}" ]]; then
+  TRAIN_ARGS+=(--stage-stop-epoch "${STAGE_STOP_EPOCH}")
 fi
 if [[ -n "${TRAINING_TIME_BUDGET_HOURS:-}" ]]; then
   TRAIN_ARGS+=(

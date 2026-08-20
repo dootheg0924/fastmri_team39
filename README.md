@@ -88,7 +88,7 @@
 * reconstruction과 평가를 나눠서 실행하고 싶다면 ```reconstruct.py``` → ```leaderboard_eval.py``` 순서도 그대로 사용할 수 있습니다. (참고용)
 
 ## 4. How to set?
-(python 3.12.9)
+(VESSL reference environment: Python 3.10.12, PyTorch 2.3.1+cu121)
 ```bash
 pip3 install -r requirements.txt
 ```
@@ -144,9 +144,20 @@ Leaderboard Recon Time : 193.96s (87.6 ms/slice)
 | 002 | Long VarNet (`c6/ch12/s4`, 80 epochs) | Ready to run | [`experiments/002_varnet_c6_long`](experiments/002_varnet_c6_long) |
 | 006 | Paper-aligned FI-VarNet (`6+6`) | Implemented | [`experiments/006_fivarnet_paper`](experiments/006_fivarnet_paper) |
 | 007 | Final FI-VarNet (`6+6`) + MRAugment, train+val | Ready to run | [`experiments/007_fivarnet_mraugment`](experiments/007_fivarnet_mraugment) |
+| 008 | Staged continuation from 007 epoch 50 with cross-acceleration re-masking | Final submission run | [`experiments/008_fivarnet_cross_acc`](experiments/008_fivarnet_cross_acc) |
 
 Experiment 002 includes a VESSL entrypoint, automatic checkpoint resume, GPU telemetry, training plots, challenge-aligned validation metrics, and a lightweight result export workflow. See its experiment README for the copy-paste VESSL command and operational checklist.
 
-The final submission workflow is experiment 007. It attempts 100 deterministic
-epochs and keeps every latest completed epoch submission-ready, so the run can
-be stopped early when the allocation expires.
+The final submission workflow is the staged 007 -> 008 run. Experiment 007
+trains the deterministic 100-epoch schedule through completed epoch 50;
+experiment 008 resumes the complete checkpoint state and continues through
+epoch 100 with cross-acceleration re-masking. Run the fresh end-to-end
+reproduction with:
+
+```bash
+bash scripts/run_final_staged_reproduction.sh
+```
+
+The exact configuration, VESSL evidence locations, stage-boundary checkpoint
+provenance, and manual recovery procedure are documented in
+[`experiments/008_fivarnet_cross_acc`](experiments/008_fivarnet_cross_acc).

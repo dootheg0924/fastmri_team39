@@ -497,17 +497,26 @@ def checkpoint_decision(
 
 
 def training_limit_reached(args, completed_epochs, global_step):
-    """Return whether either the configured step or explicit epoch cap is done."""
+    """Return whether a configured step, epoch, or staged boundary is done."""
     max_steps = getattr(args, 'max_steps', None)
     max_training_epochs = getattr(args, 'max_training_epochs', None)
+    stage_stop_epoch = getattr(args, 'stage_stop_epoch', None)
     step_limit = max_steps is not None and int(global_step) >= int(max_steps)
     epoch_limit = (
         max_training_epochs is not None
         and int(completed_epochs) >= int(max_training_epochs)
     )
-    if max_steps is None and max_training_epochs is None:
+    stage_limit = (
+        stage_stop_epoch is not None
+        and int(completed_epochs) >= int(stage_stop_epoch)
+    )
+    if (
+        max_steps is None
+        and max_training_epochs is None
+        and stage_stop_epoch is None
+    ):
         epoch_limit = int(completed_epochs) >= int(args.num_epochs)
-    return step_limit or epoch_limit
+    return step_limit or epoch_limit or stage_limit
 
 
 def capture_rng_state():
@@ -1194,6 +1203,15 @@ def train(args):
     max_training_epochs = getattr(args, 'max_training_epochs', None)
     if max_training_epochs is not None and max_training_epochs <= 0:
         raise ValueError('--max-training-epochs must be positive.')
+    stage_stop_epoch = getattr(args, 'stage_stop_epoch', None)
+    if stage_stop_epoch is not None:
+        if stage_stop_epoch <= 0:
+            raise ValueError('--stage-stop-epoch must be positive.')
+        if stage_stop_epoch > int(args.num_epochs):
+            raise ValueError(
+                '--stage-stop-epoch cannot exceed the configured --num-epochs '
+                'schedule horizon.'
+            )
     if getattr(args, 'checkpoint_metric', None) == 'paper-final' and max_steps is None:
         raise ValueError('paper-final checkpointing requires --max-steps.')
 
@@ -1203,6 +1221,7 @@ def train(args):
     completion_message = (
         f'Checkpoint already reached epoch {start_epoch}, step {global_step}; '
         f'limits: epochs={max_training_epochs or args.num_epochs}, '
+        f'stage_stop={stage_stop_epoch or "-"}, '
         f'steps={max_steps or "-"}.'
     )
     if training_complete:

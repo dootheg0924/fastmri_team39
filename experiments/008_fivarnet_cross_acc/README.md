@@ -5,8 +5,8 @@ one thing about training: which acceleration a volume is presented at.
 
 The run is deliberately **staged**, not restarted. Stage one is the 007 profile
 from epoch 0 to 50; stage two is this profile from epoch 50 to 100, resumed from
-stage one's epoch-50 checkpoint. Both stages are reproducible on their own, and
-the README below is the record the rule book asks for.
+stage one's epoch-50 checkpoint. The supplied end-to-end runner reproduces both
+stages from scratch without a timing-dependent manual stop.
 
 ## Rule book compliance
 
@@ -41,10 +41,11 @@ drops still carry energy. **The label does not depend on the mask.** Any volume
 can therefore be re-undersampled at R8 and stay a valid acc8 pair.
 
 With `CROSS_ACCELERATION=1.0` and `CROSS_ACCELERATION_P8=0.5`, each volume-epoch
-draws its acceleration instead of inheriting it. The R8 half of every epoch is
-then sourced from *all* volumes rather than only the R8-tagged half, roughly
-doubling the distinct anatomy behind R8 examples. The number of R8 optimizer
-steps per epoch is unchanged; only the pool they are drawn from grows.
+draws its acceleration instead of inheriting it. In expectation, the R8 half of
+training is then sourced from *all* volumes rather than only the R8-tagged half,
+roughly doubling the distinct anatomy behind R8 examples. The draw is
+deterministic but Bernoulli per volume, so an individual epoch is not guaranteed
+to contain an exact 50/50 split (`BALANCE_ACCELERATIONS=0`).
 
 This is not a new technique: it is what the reference fastMRI `MaskFunc` does,
 vendored in this repository at `utils/model/fastmri/data/subsample.py:65-67`,
@@ -66,8 +67,8 @@ turn out to share one ACS geometry:
 
 So re-targeting leaves the ACS essentially unchanged and only the outer stride
 moves. An earlier reading of two sample volumes suggested R8 used a wider ACS
-(31/372); that pair was not representative of the set. The startup log is the
-authority here -- check it rather than any figure quoted in this file.
+(31/372); that pair was not representative of the set. The full dataset scan
+and the expected startup output below both record the corrected 29-line ACS.
 
 ## Reproducibility
 
@@ -76,9 +77,11 @@ Stage two reproduces only if it starts from the same stage-one weights, so:
 - `--expected-resume-epoch 50` fails the launch if `model.pt` holds an earlier
   epoch. Resuming later than 50 after an interruption is allowed and logged.
 - The SHA-256 of the resumed checkpoint is printed at startup and recorded in
-  `run_metadata.json` under `arguments.resume_metadata`. **Paste it into the
-  final submission README** — it is what proves stage two continued from the
-  stated checkpoint.
+  `run_metadata.json` under `arguments.resume_metadata`. It proves the lineage
+  of the actual VESSL stage transition. It is not a requirement that a later
+  reproduction produce a byte-identical checkpoint archive: serialized CLI
+  metadata can change the file digest without changing learned state. The rule
+  book criterion is the reproduced final score.
 - The acceleration draw uses
   `deterministic_rng(seed, epoch, fname, purpose="cross-acceleration")`, a
   blake2b hash of those fields. It does not depend on worker count, worker
@@ -92,7 +95,26 @@ Stage two reproduces only if it starts from the same stage-one weights, so:
   stays 100, so the LR shape and the MRAugment horizon do not retune on resume.
 - `CROSS_ACCELERATION=0` restores 007 behaviour exactly.
 
-## Stage one: stop at epoch 50 and archive it
+## Fresh end-to-end reproduction
+
+Run this only with fresh stage-one and stage-two result directories:
+
+```bash
+bash scripts/run_final_staged_reproduction.sh
+```
+
+`scripts/run_final_staged_reproduction.sh` runs 007 with
+`STAGE_STOP_EPOCH=50`, verifies that `model.pt` stores exactly 50 completed
+epochs, archives and fingerprints it, copies it into a fresh 008 result
+directory, and launches stage two. `STAGE_STOP_EPOCH` is deliberately separate
+from `NUM_EPOCHS=100`: it ends stage one without changing the 100-epoch LR or
+MRAugment schedule horizon.
+
+The defaults assume `/root/Data` and `../result`. `DATA_ROOT`, `RESULT_ROOT`,
+`STAGE1_EXP_NAME`, and `STAGE2_EXP_NAME` may be overridden for an isolated
+reproduction. The runner refuses to reuse either experiment directory.
+
+## Historical stage-one procedure and checkpoint
 
 007 runs with `CHECKPOINT_INTERVAL=0`, so it keeps only `model.pt` (rewritten
 every epoch) and `best_model.pt`. There is one GPU, so stage one has to be
@@ -112,10 +134,11 @@ print('completed epochs =', torch.load('$SRC/model.pt', map_location='cpu', weig
 "
 ```
 
-When that prints 50, stop stage one (Ctrl-C in its terminal, or `pkill -f train.py`)
-and archive the weights. The archive copy is separate on purpose: stage two
-overwrites its own `model.pt` at its first epoch, and this file is both the
-baseline for `leaderboard_eval.py` and the reproducibility record.
+The submitted run predates the automated stage boundary. When the command
+printed 50, stage one was stopped and the weights were archived. The archive
+copy is separate on purpose: stage two overwrites its own `model.pt` at its
+first epoch, and this file is both the baseline for `leaderboard_eval.py` and
+the provenance record.
 
 ```bash
 mkdir -p ../result/staged_checkpoints
@@ -139,8 +162,10 @@ epoch   50
 sha256  4ae5f62c343f28e25809e0b0f2fd04154a34d8144fdff9546359096ac3cf43b6
 ```
 
-A reproduction runs stage one for 50 epochs and should arrive at this checkpoint;
-stage two's startup log restates the SHA-256 it actually resumed from.
+The digest identifies the checkpoint used by the actual VESSL run. A fresh
+reproduction must reach completed epoch 50 with the documented schedule and
+then reproduce the final score; its serialized checkpoint digest need not be
+identical. Stage two's startup log records the digest it actually resumed from.
 
 Stage-one epochs took about 5h20m each at this point in training (measured at
 3.52 s per micro-batch over 5,444 micro-batches). Earlier epochs were faster
@@ -165,12 +190,47 @@ Check two lines in the startup log before letting it run:
 ```
 Resumed from .../model.pt at epoch 50; global step ...
 Resume checkpoint sha256: <64 hex chars>
-Cross-acceleration mask catalogue -> R4: N volumes, ACS 29 lines (0.0788), R8: M volumes, ACS 31 lines (0.0833)
+Cross-acceleration mask catalogue -> R4: 100 volumes, ACS 29 lines (0.0788), R8: 100 volumes, ACS 29 lines (0.0788)
 ```
 
-The catalogue line is the only place the ACS widths that re-targeted masks will
-use are reported. The measured widths above come from one sample volume per
-acceleration — trust the log over this README.
+The catalogue is derived exclusively from the supplied train and validation
+volumes. Leaderboard data and leaderboard-derived statistics are not used by
+the training pipeline.
+
+## VESSL provenance and evidence
+
+The actual final run left the following evidence under `../result` on VESSL:
+
+```text
+final_fivarnet_submission_f6i6_mraugment_all_data/
+  resolved_config.env
+  git_state.txt
+  python_environment.txt
+  gpu_environment.txt
+  run_metadata.json
+  training_history.csv
+final_fivarnet_submission_f6i6_mraugment_cross_acc/
+  resolved_config.env
+  git_state.txt
+  python_environment.txt
+  gpu_environment.txt
+  run_metadata.json
+  training_history.csv
+logs/final_fivarnet_submission_f6i6_mraugment_all_data.log
+logs/final_fivarnet_submission_f6i6_mraugment_cross_acc.log
+stage2_launch.log
+staged_checkpoints/checkpoint_epoch_0050.pt
+```
+
+The experiment launchers also record the exact Git commit, dirty-worktree
+state, resolved arguments, Python packages, GPU environment, per-epoch history,
+and the stage-two resume digest. These files must be archived with the final
+submission evidence even though local `*.log` files are excluded from Git.
+
+The submitted VESSL environment used Python 3.10.12 and PyTorch 2.3.1+cu121.
+Direct dependencies are pinned in `requirements.txt`; the full captured VESSL
+environment is retained in `requirements-vessl.lock.txt` and each experiment's
+`python_environment.txt`.
 
 ## Checkpoints kept
 

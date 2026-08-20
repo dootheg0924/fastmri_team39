@@ -289,6 +289,13 @@ def parse():
         help='Optional hard epoch cap even when --max-steps is active',
     )
     parser.add_argument(
+        '--stage-stop-epoch',
+        type=int,
+        default=None,
+        help='Stop a staged run after this many completed epochs without '
+             'changing the configured LR or augmentation horizon',
+    )
+    parser.add_argument(
         '--training-time-budget-hours',
         type=float,
         default=None,

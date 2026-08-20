@@ -24,4 +24,7 @@ if missing:
     )
 PY
 
-exec bash scripts/run_varnet_c6_long.sh
+: "${FINAL_STAGE_STOP_EPOCH:=89}"
+export FINAL_STAGE_STOP_EPOCH
+
+exec bash scripts/run_final_staged_reproduction.sh
