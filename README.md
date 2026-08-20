@@ -150,14 +150,21 @@ Experiment 002 includes a VESSL entrypoint, automatic checkpoint resume, GPU tel
 
 The final submission workflow is the staged 007 -> 008 run. Experiment 007
 trains the deterministic 100-epoch schedule through completed epoch 50;
-experiment 008 resumes the complete checkpoint state and continues through
-epoch 100 with cross-acceleration re-masking. Run the fresh end-to-end
-reproduction with:
+experiment 008 resumes the complete checkpoint state with cross-acceleration
+re-masking and stops after completed epoch 89 without changing the 100-epoch
+schedule horizon. Run the fresh end-to-end reproduction with:
 
 ```bash
-bash scripts/run_final_staged_reproduction.sh
+FINAL_STAGE_STOP_EPOCH=89 bash scripts/run_final_staged_reproduction.sh
 ```
 
 The exact configuration, VESSL evidence locations, stage-boundary checkpoint
 provenance, and manual recovery procedure are documented in
 [`experiments/008_fivarnet_cross_acc`](experiments/008_fivarnet_cross_acc).
+
+The final submission checkpoint is fixed to the latest completed epoch 89.
+Create its immutable byte-for-byte candidate with:
+
+```bash
+RESULT_ROOT=/root/result bash scripts/prepare_epoch89_final_candidate.sh
+```

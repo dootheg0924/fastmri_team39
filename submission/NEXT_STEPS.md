@@ -25,11 +25,7 @@ from pathlib import Path
 import torch
 
 root = Path(os.environ["STAGE2_DIR"]) / "checkpoints"
-for name, expected in [
-    ("checkpoint_epoch_0080.pt", 80),
-    ("checkpoint_epoch_0085.pt", 85),
-    ("best_model.pt", 89),
-]:
+for name, expected in [("best_model.pt", 89)]:
     path = root / name
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     observed = int(checkpoint["epoch"])
@@ -38,43 +34,39 @@ for name, expected in [
     print(path, observed)
 PY
 
-sha256sum \
-  "${STAGE2_DIR}/checkpoints/checkpoint_epoch_0080.pt" \
-  "${STAGE2_DIR}/checkpoints/checkpoint_epoch_0085.pt" \
-  "${STAGE2_DIR}/checkpoints/best_model.pt"
+sha256sum "${STAGE2_DIR}/checkpoints/best_model.pt"
 ```
 
-## 2. 두 후보 동결
+## 2. 확정된 epoch89 후보 동결
 
 ```bash
-RESULT_ROOT="${RESULT_ROOT}" bash scripts/prepare_both_final_candidates.sh
+RESULT_ROOT="${RESULT_ROOT}" bash scripts/prepare_epoch89_final_candidate.sh
 ```
 
 생성 결과:
 
 ```text
 ${RESULT_ROOT}/final_candidates/epoch89/
-${RESULT_ROOT}/final_candidates/avg_80_85_89/
 ```
 
-각 directory의 `candidate_manifest.json`과 checkpoint SHA-256을 보존한다.
+이미 같은 directory를 생성했다면 덮어쓰지 말고 기존
+`candidate_manifest.json`과 checkpoint SHA-256을 검증한다.
 
-## 3. 두 후보 평가
+## 3. epoch89 공식 평가
 
 ```bash
-for candidate in epoch89 avg_80_85_89; do
-  FINAL_CANDIDATE_DIR="${RESULT_ROOT}/final_candidates/${candidate}" \
-  LEADERBOARD_PATH=/root/Data/leaderboard \
-  GPU_NUM=0 \
-  bash scripts/run_final_eval.sh
-done
+FINAL_CANDIDATE_DIR="${RESULT_ROOT}/final_candidates/epoch89" \
+LEADERBOARD_PATH=/root/Data/leaderboard \
+GPU_NUM=0 \
+bash scripts/run_final_eval.sh
 ```
 
-각 candidate의 `evidence/official_eval/eval_metadata_*.json`을 비교하되, 선택 이유와 규정상 model-selection 원칙을 최종 README/PPT에서 일관되게 설명한다.
+이 평가 결과의 checkpoint SHA-256과 candidate manifest SHA-256이 같은지
+확인한다. 다른 checkpoint 조합을 추가 비교하지 않는다.
 
-## 4. 최종 선택 주입
+## 4. 확정 선택 주입
 
-아래 예시는 `epoch89` 선택 시다. 평균 후보라면 두 경로의 candidate ID만 바꾼다.
+최종 ID는 변경하지 않는다.
 
 ```bash
 export FINAL_ID=epoch89

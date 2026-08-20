@@ -10,6 +10,9 @@ from pathlib import Path
 
 
 PLACEHOLDER = re.compile(r"\{\{[A-Z0-9_]+\}\}")
+FINAL_CANDIDATE_ID = "epoch89"
+FINAL_MODE = "single"
+FINAL_SOURCE_EPOCHS = [89]
 
 
 def _read_json(path: Path) -> dict:
@@ -75,6 +78,16 @@ def finalize(
     candidate_dir = candidate_dir.resolve()
     manifest = _read_json(candidate_dir / "candidate_manifest.json")
     evaluation = _read_json(eval_metadata_path)
+    if manifest.get("candidate_id") != FINAL_CANDIDATE_ID:
+        raise ValueError(
+            f"Final submission is fixed to candidate {FINAL_CANDIDATE_ID!r}"
+        )
+    if manifest.get("mode") != FINAL_MODE:
+        raise ValueError("Final submission requires the single epoch-89 checkpoint")
+    if manifest.get("source_epochs") != FINAL_SOURCE_EPOCHS:
+        raise ValueError("Final submission source epoch must be exactly [89]")
+    if int(manifest["final_checkpoint"]["stored_epoch"]) != 89:
+        raise ValueError("Final submission checkpoint must store completed epoch 89")
     if evaluation["candidate_id"] != manifest["candidate_id"]:
         raise ValueError("Evaluation metadata belongs to a different candidate")
     candidate_sha = manifest["final_checkpoint"]["sha256"]
@@ -82,11 +95,7 @@ def finalize(
         raise ValueError("Evaluation checkpoint hash does not match candidate manifest")
 
     scores = evaluation["scores"]
-    mode_description = (
-        "epoch 89 단일 checkpoint"
-        if manifest["mode"] == "single"
-        else "epoch 80/85/89 checkpoint의 1:1:1 weight arithmetic mean"
-    )
+    mode_description = "epoch 89 단일 checkpoint (byte-for-byte copy)"
     replacements = {
         "{{TEAM_NAME}}": team_name,
         "{{TEAM_MEMBERS}}": team_members,

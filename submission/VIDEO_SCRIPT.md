@@ -1,6 +1,7 @@
 # Final submission explanation video script
 
-목표 길이: 5–7분. `[FINAL]`만 후보 선택 뒤 교체한다.
+목표 길이: 5–7분. 최종 후보는 epoch 89로 확정됐고 `[FINAL]` 점수·hash만
+공식 평가 뒤 교체한다.
 
 ## 0:00–0:30 소개
 
@@ -25,11 +26,15 @@
 - stage-2 resume log
 - epoch 80/85 snapshot과 epoch 89 저장 화면
 
-## 3:15–4:00 후보와 선택 `[FINAL]`
+## 3:15–4:00 최종 checkpoint 선택 `[FINAL]`
 
-“검토한 후보는 epoch 89 단일 checkpoint와 epoch 80, 85, 89 checkpoint의 1:1:1 weight average입니다. 최종 제출에는 `[FINAL_CANDIDATE]`를 사용했습니다. 제출 checkpoint의 SHA-256은 `[FINAL_SHA256]`입니다.”
+“최종 제출은 완료 epoch 89의 원본 checkpoint를 byte-for-byte 복사한
+`epoch89` 후보로 확정했습니다. 80/85/89 weight average는 diagnostic 성능이
+하락해 제출 대상에서 제외했습니다. 제출 checkpoint의 SHA-256은
+`[FINAL_SHA256]`입니다.”
 
-평균 후보인 경우 floating tensor 산술평균과 non-floating buffer equality guard를 짧게 설명한다.
+후보를 추가로 조합하거나 public leaderboard 결과로 다시 선택하지 않았음을
+설명한다.
 
 ## 4:00–4:45 inference
 

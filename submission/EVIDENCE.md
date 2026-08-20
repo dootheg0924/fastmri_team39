@@ -14,7 +14,8 @@ dirty patch, a source archive, Python/package/GPU/process state, available
 experiment metadata and logs, checkpoint hashes, and a `SHA256SUMS` index. It
 does not signal the training process or modify checkpoints.
 
-최종 모델 선택과 무관하게 지금부터 아래 자료를 원본 그대로 보존한다. 복사본에는 SHA-256을 붙이고 원본 terminal/Codex 창은 닫지 않는다.
+최종 모델은 epoch 89 단일 checkpoint로 확정했다. 아래 자료를 원본 그대로
+보존하고 복사본에는 SHA-256을 붙이며 원본 terminal/Codex 창은 닫지 않는다.
 
 ## final_training
 
@@ -50,8 +51,8 @@ does not signal the training process or modify checkpoints.
 
 ## official_eval
 
-- [ ] 선택 전 두 candidate의 diagnostic 결과
-- [ ] 최종 선택 candidate의 VESSL 공식 `recon_eval.py` log
+- [ ] weight average 성능 하락 diagnostic 결과(제출 후보 아님)
+- [ ] `epoch89` candidate의 VESSL 공식 `recon_eval.py` log
 - [ ] 최종 `eval_metadata_*.json`
 - [ ] checkpoint 평가 전/후 SHA-256
 - [ ] leaderboard 업로드 화면
@@ -65,9 +66,9 @@ does not signal the training process or modify checkpoints.
 - [ ] cloud/VESSL 제출 경로
 - [ ] 전송 완료 이메일
 
-## 아직 모델 선택 뒤에만 할 수 있는 것
+## epoch89 저장·평가 뒤에 할 수 있는 것
 
-- 최종 candidate ID와 SHA-256 확정
+- epoch89 checkpoint SHA-256 확정
 - 최종 공식 점수·시간 확정
 - `scripts/finalize_submission.py` 실행
 - PPT/영상에 최종 값 삽입

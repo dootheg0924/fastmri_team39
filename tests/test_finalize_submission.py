@@ -2,6 +2,7 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
 import torch
 
 from scripts.finalize_submission import finalize
@@ -53,3 +54,39 @@ def test_finalize_binds_readme_to_candidate_and_score(tmp_path):
     assert json.loads(selection.read_text(encoding="utf-8"))["candidate_manifest"][
         "candidate_id"
     ] == "epoch89"
+
+
+def test_finalize_rejects_non_epoch89_candidate(tmp_path):
+    source = tmp_path / "best_model.pt"
+    torch.save(
+        {"model": {"weight": torch.ones(1)}, "args": Namespace(), "epoch": 89},
+        source,
+    )
+    candidate_dir, _ = prepare_candidate(
+        mode="single",
+        checkpoint_paths=[source],
+        expected_epochs=[89],
+        output_root=tmp_path / "candidates",
+        candidate_id="not_the_final_candidate",
+    )
+    log = tmp_path / "eval.log"
+    log.write_text(
+        "Leaderboard SSIM_full : 0.9001\n"
+        "Leaderboard SSIM_bbox : 0.8002\n"
+        "Leaderboard Recon Time : 10.00s (20.3 ms/slice)\n",
+        encoding="utf-8",
+    )
+    eval_path = tmp_path / "eval.json"
+    write_eval_metadata(
+        candidate_dir=candidate_dir, log_path=log, output_path=eval_path
+    )
+    with pytest.raises(ValueError, match="fixed to candidate 'epoch89'"):
+        finalize(
+            candidate_dir=candidate_dir,
+            eval_metadata_path=eval_path,
+            template_path=Path("submission/README.template.md"),
+            output_readme=tmp_path / "README.md",
+            output_selection=tmp_path / "FINAL_SELECTION.json",
+            team_name="Team 39",
+            team_members="A, B",
+        )

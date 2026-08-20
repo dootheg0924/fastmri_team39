@@ -2,8 +2,8 @@
 # Reproduce the final 007 -> 008 training pipeline from scratch on VESSL.
 # Stage one keeps a 100-epoch schedule but exits after completing epoch 50;
 # stage two resumes the complete model/optimizer/scheduler/RNG state. By
-# default it runs to epoch 100; FINAL_STAGE_STOP_EPOCH=89 preserves the same
-# 100-epoch schedules while finalizing after completed epoch 89.
+# The fixed final run stops after completed epoch 89 while preserving the same
+# 100-epoch LR and augmentation schedule horizons.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,7 +14,7 @@ DATA_ROOT="${DATA_ROOT:-/root/Data}"
 RESULT_ROOT="${RESULT_ROOT:-${REPO_ROOT}/../result}"
 STAGE1_EXP_NAME="${STAGE1_EXP_NAME:-final_fivarnet_submission_f6i6_mraugment_all_data}"
 STAGE2_EXP_NAME="${STAGE2_EXP_NAME:-final_fivarnet_submission_f6i6_mraugment_cross_acc}"
-FINAL_STAGE_STOP_EPOCH="${FINAL_STAGE_STOP_EPOCH:-}"
+FINAL_STAGE_STOP_EPOCH="${FINAL_STAGE_STOP_EPOCH:-89}"
 STAGED_DIR="${RESULT_ROOT}/staged_checkpoints"
 STAGE1_DIR="${RESULT_ROOT}/${STAGE1_EXP_NAME}"
 STAGE2_DIR="${RESULT_ROOT}/${STAGE2_EXP_NAME}"
@@ -22,12 +22,10 @@ STAGE1_CHECKPOINT="${STAGE1_DIR}/checkpoints/model.pt"
 STAGED_CHECKPOINT="${STAGED_DIR}/checkpoint_epoch_0050.pt"
 STAGE2_CHECKPOINT="${STAGE2_DIR}/checkpoints/model.pt"
 
-if [[ -n "${FINAL_STAGE_STOP_EPOCH}" ]]; then
-  if ! [[ "${FINAL_STAGE_STOP_EPOCH}" =~ ^[0-9]+$ ]] \
-     || (( FINAL_STAGE_STOP_EPOCH <= 50 || FINAL_STAGE_STOP_EPOCH > 100 )); then
-    echo "[ERROR] FINAL_STAGE_STOP_EPOCH must be an integer in [51, 100]." >&2
-    exit 2
-  fi
+if ! [[ "${FINAL_STAGE_STOP_EPOCH}" =~ ^[0-9]+$ ]] \
+   || (( FINAL_STAGE_STOP_EPOCH <= 50 || FINAL_STAGE_STOP_EPOCH > 100 )); then
+  echo "[ERROR] FINAL_STAGE_STOP_EPOCH must be an integer in [51, 100]." >&2
+  exit 2
 fi
 
 for path in "${STAGE1_DIR}" "${STAGE2_DIR}" "${STAGED_CHECKPOINT}"; do
@@ -72,7 +70,7 @@ EXP_NAME="${STAGE2_EXP_NAME}" \
 STAGE_STOP_EPOCH="${FINAL_STAGE_STOP_EPOCH}" \
 bash scripts/run_fivarnet_cross_acc.sh
 
-EXPECTED_FINAL_EPOCH="${FINAL_STAGE_STOP_EPOCH:-100}"
+EXPECTED_FINAL_EPOCH="${FINAL_STAGE_STOP_EPOCH}"
 STAGE2_CHECKPOINT="${STAGE2_CHECKPOINT}" \
 EXPECTED_FINAL_EPOCH="${EXPECTED_FINAL_EPOCH}" python - <<'PY'
 import os

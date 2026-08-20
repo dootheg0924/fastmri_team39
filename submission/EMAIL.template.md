@@ -12,7 +12,7 @@
 
 2026 SNU FastMRI Challenge 최종 제출물을 전달드립니다.
 
-- Final candidate: `{candidate_id}`
+- Final candidate: `epoch89`
 - Checkpoint SHA-256: `{sha256}`
 - SSIM_full: `{score}`
 - SSIM_bbox: `{score}`

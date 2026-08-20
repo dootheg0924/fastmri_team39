@@ -100,15 +100,15 @@ Stage two reproduces only if it starts from the same stage-one weights, so:
 Run this only with fresh stage-one and stage-two result directories:
 
 ```bash
-bash scripts/run_final_staged_reproduction.sh
+FINAL_STAGE_STOP_EPOCH=89 bash scripts/run_final_staged_reproduction.sh
 ```
 
 `scripts/run_final_staged_reproduction.sh` runs 007 with
 `STAGE_STOP_EPOCH=50`, verifies that `model.pt` stores exactly 50 completed
 epochs, archives and fingerprints it, copies it into a fresh 008 result
-directory, and launches stage two. `STAGE_STOP_EPOCH` is deliberately separate
-from `NUM_EPOCHS=100`: it ends stage one without changing the 100-epoch LR or
-MRAugment schedule horizon.
+directory, and launches stage two through completed epoch 89.
+`STAGE_STOP_EPOCH` is deliberately separate from `NUM_EPOCHS=100`: it ends each
+stage without changing the 100-epoch LR or MRAugment schedule horizon.
 
 The defaults assume `/root/Data` and `../result`. `DATA_ROOT`, `RESULT_ROOT`,
 `STAGE1_EXP_NAME`, and `STAGE2_EXP_NAME` may be overridden for an isolated
@@ -240,10 +240,10 @@ environment is retained in `requirements-vessl.lock.txt` and each experiment's
 | `best_model.pt` | every epoch (`submission-latest`) | latest complete epoch, submission-ready |
 | `checkpoint_epoch_{0080,0085,0090,0095}.pt` | those epochs only | standalone late-epoch snapshots |
 
-`CHECKPOINT_EPOCHS="80 85 90 95"` keeps the late epochs so the submission can be
-chosen after the fact instead of being fixed by whenever the run stops. The
-snapshots are copies taken alongside `model.pt` and are never promoted, so
-`best_model.pt` is unaffected.
+`CHECKPOINT_EPOCHS="80 85 90 95"` preserves diagnostic snapshots from the
+actual run. They are not final candidates: the final submission is fixed to
+the epoch-89 `best_model.pt`. The snapshots are copies taken alongside
+`model.pt` and are never promoted, so `best_model.pt` is unaffected.
 
 ## Known limits
 

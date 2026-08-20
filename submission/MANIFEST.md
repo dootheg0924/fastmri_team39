@@ -3,27 +3,30 @@
 ## 고정된 code path
 
 - 학습: `scripts/run_final_staged_reproduction.sh`
-- 후보 생성: `scripts/prepare_final_candidate.py`
+- 최종 후보 생성: `scripts/prepare_epoch89_final_candidate.sh`
 - 공식 평가: `scripts/run_final_eval.sh` → 변경 없는 `recon_eval.py`
 - inference: `utils/learning/test_part.py`
 - stage configs: `experiments/007_fivarnet_mraugment`, `experiments/008_fivarnet_cross_acc`
 
-## 후보 두 개
+## 확정된 최종 후보
 
 | Candidate ID | Source | 생성 규칙 | 상태 |
 |---|---|---|---|
-| `epoch89` | epoch 89 | 원본 checkpoint byte-for-byte copy | checkpoint 도착 대기 |
-| `avg_80_85_89` | epoch 80, 85, 89 | floating/complex state 1:1:1 arithmetic mean | checkpoint 도착 대기 |
+| `epoch89` | epoch 89 | 원본 checkpoint byte-for-byte copy | **최종 선택 확정** |
 
-두 후보는 동일한 `checkpoints/best_model.pt` layout과 `candidate_manifest.json`을 사용한다. 최종 선택 전에는 어느 것도 `submission/FINAL_SELECTION.json`으로 승격하지 않는다.
+80/85/89 weight average는 diagnostic에서 성능 하락을 보여 최종 제출에서
+제외했다. prediction ensemble은 구현 기록만 별도 branch에 보존하고 main 및
+최종 package에는 포함하지 않는다.
 
-epoch 89 학습이 완전히 저장된 뒤 두 후보를 한 번에 생성한다.
+epoch 89 학습이 완전히 저장된 뒤 최종 후보 하나만 생성한다.
 
 ```bash
-RESULT_ROOT=/root/result bash scripts/prepare_both_final_candidates.sh
+RESULT_ROOT=/root/result bash scripts/prepare_epoch89_final_candidate.sh
 ```
 
-각 candidate directory는 덮어쓰지 않으므로 생성 이후 내용이 바뀌면 즉시 탐지할 수 있다.
+candidate directory는 덮어쓰지 않으므로 생성 이후 내용이 바뀌면 즉시
+탐지할 수 있다. `scripts/finalize_submission.py`는 `epoch89`, `single`, source
+epoch `[89]`, stored epoch `89`가 아니면 최종화를 거부한다.
 
 ## 최종 package 필수 항목
 

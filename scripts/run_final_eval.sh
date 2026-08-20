@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Evaluate one immutable candidate with the unchanged official recon_eval.py.
+# Evaluate the fixed epoch-89 candidate with the unchanged official recon_eval.py.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +23,30 @@ for required_file in "${CHECKPOINT}" "${MANIFEST}" "${REPO_ROOT}/recon_eval.py";
     exit 2
   fi
 done
+
+FINAL_CANDIDATE_DIR="${FINAL_CANDIDATE_DIR}" "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+candidate = Path(os.environ["FINAL_CANDIDATE_DIR"])
+manifest = json.loads((candidate / "candidate_manifest.json").read_text(encoding="utf-8"))
+expected = {
+    "candidate_id": "epoch89",
+    "mode": "single",
+    "source_epochs": [89],
+}
+for key, value in expected.items():
+    if manifest.get(key) != value:
+        raise SystemExit(
+            f"[ERROR] Final evaluation requires {key}={value!r}; "
+            f"found {manifest.get(key)!r}"
+        )
+if int(manifest["final_checkpoint"]["stored_epoch"]) != 89:
+    raise SystemExit("[ERROR] Final evaluation requires stored epoch 89")
+print("Verified fixed final selection: epoch89 / single / stored epoch 89")
+PY
+
 for acc in acc4 acc8; do
   for kind in image kspace; do
     if [[ ! -d "${LEADERBOARD_PATH}/${acc}/${kind}" ]]; then

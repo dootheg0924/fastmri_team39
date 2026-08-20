@@ -59,7 +59,10 @@ ${DATA_ROOT}/
 - augmentation/mask/cross-acceleration은 목적별 hash-derived RNG 사용
 - checkpoint에 model/optimizer/scheduler/RNG state를 함께 저장하여 stage 2를 재개
 
-최종 선택 규칙은 public leaderboard와 무관하다. 100-epoch schedule을 유지하면서 마감 전에 완료된 epoch 89를 고정했고, 최종 후보는 위 표의 `{{FINAL_MODE}}` 방식으로 생성했다.
+최종 선택 규칙은 public leaderboard와 무관하다. 100-epoch schedule을
+유지하면서 마감 전에 완료된 epoch 89를 최종 checkpoint로 고정했다. 최종
+후보 ID는 `epoch89`, 방식은 `single`이며 원본 checkpoint를 byte-for-byte
+복사한다.
 
 ## 5. 처음부터 학습 재현
 
@@ -86,7 +89,9 @@ stage 1은 epoch 50까지 실행한 뒤 checkpoint epoch와 SHA-256을 확인한
 {{FINAL_CANDIDATE_BUILD_COMMAND}}
 ```
 
-평균 후보인 경우 floating-point/complex `state_dict` tensor만 1:1:1 산술평균한다. 정수형 buffer는 세 checkpoint에서 완전히 동일해야 하며, 다르면 생성이 중단된다. 평균 checkpoint는 inference 전용이며 optimizer resume에는 사용하지 않는다.
+`scripts/finalize_submission.py`는 candidate ID `epoch89`, mode `single`, source
+epoch `[89]`, stored epoch `89`가 모두 맞지 않으면 최종 README와 selection
+record 생성을 거부한다.
 
 ## 7. 공식 reconstruction 및 scoring
 
@@ -136,8 +141,8 @@ evidence/
 | 파일 | 역할 |
 |---|---|
 | `scripts/run_final_staged_reproduction.sh` | fresh 007→008 end-to-end 학습 |
-| `scripts/prepare_both_final_candidates.sh` | epoch 89 도달 후 두 후보를 동시에 고정 |
-| `scripts/prepare_final_candidate.py` | epoch 89 단일 또는 80/85/89 weight-average 후보 생성 |
+| `scripts/prepare_epoch89_final_candidate.sh` | 확정된 epoch 89 단일 후보 고정 |
+| `scripts/prepare_final_candidate.py` | immutable candidate builder; final wrapper는 single mode만 사용 |
 | `scripts/run_final_eval.sh` | 공식 `recon_eval.py` 실행과 환경/log 보존 |
 | `scripts/parse_recon_eval.py` | 공식 출력의 machine-readable 기록 |
 | `utils/learning/test_part.py` | checkpoint load, `prep_volume`, `recon_slice` |

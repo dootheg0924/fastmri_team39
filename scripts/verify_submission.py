@@ -28,7 +28,7 @@ REQUIRED_CODE = [
     "utils/learning/test_part.py",
     "scripts/run_final_staged_reproduction.sh",
     "scripts/prepare_final_candidate.py",
-    "scripts/prepare_both_final_candidates.sh",
+    "scripts/prepare_epoch89_final_candidate.sh",
     "scripts/run_final_eval.sh",
     "scripts/capture_submission_evidence.sh",
     "scripts/parse_recon_eval.py",
@@ -184,6 +184,20 @@ def run_checks(
             record("final_readme", not unresolved, "unresolved placeholders" if unresolved else "ok")
     else:
         record("final_readme", True, "pending by request")
+
+    if final_readme is not None and candidate_details is not None:
+        fixed_selection = (
+            candidate_details.get("candidate_id") == "epoch89"
+            and candidate_details.get("mode") == "single"
+            and candidate_details.get("stored_epoch") == 89
+        )
+        record(
+            "fixed_final_selection",
+            fixed_selection,
+            "expected candidate=epoch89 mode=single stored_epoch=89",
+        )
+    else:
+        record("fixed_final_selection", True, "checked during finalization")
 
     if require_vessl:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unavailable"

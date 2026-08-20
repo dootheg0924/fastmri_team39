@@ -1,13 +1,14 @@
 # Final submission PPT outline
 
-최종 후보가 정해지기 전까지 슬라이드 1–8은 완성할 수 있다. `[FINAL]` 표시만 선택 후 채운다.
+최종 후보는 epoch 89 단일 checkpoint로 확정됐다. `[FINAL]` 표시는 실제
+SHA-256과 공식 평가 점수가 나온 뒤 채운다.
 
 ## Slide 1 — Team / submission identity
 
 - 팀명과 팀원
 - 2026 SNU FastMRI Challenge
 - 최종 모델: FI-VarNet 6+6, MRAugment, cross-acceleration
-- `[FINAL]` candidate ID
+- candidate ID: `epoch89`
 
 ## Slide 2 — 문제와 규정 준수
 
@@ -42,17 +43,13 @@
 - epoch 80, 85 snapshot 및 epoch 89 final state
 - 마감 때문에 schedule horizon은 그대로 두고 completed epoch 89에서 stop
 
-## Slide 6 — 후보 두 개와 공통 평가 계약
+## Slide 6 — 최종 checkpoint 결정
 
-| 후보 | 정의 |
-|---|---|
-| `epoch89` | epoch 89 원본 checkpoint |
-| `avg_80_85_89` | epoch 80/85/89 floating state의 1:1:1 산술평균 |
-
-- 두 후보 모두 `checkpoints/best_model.pt`
-- 각각 독립 `candidate_manifest.json`과 SHA-256
-- 동일한 변경 없는 `recon_eval.py` 사용
-- `[FINAL]` 선택된 후보와 선택 기준
+- 최종 후보: `epoch89`
+- 생성 규칙: epoch 89 원본 checkpoint byte-for-byte copy
+- weight average는 diagnostic 성능 하락으로 제출 대상에서 제외
+- `candidate_manifest.json`과 SHA-256으로 원본·평가 파일 일치 확인
+- 변경 없는 `recon_eval.py`로 공식 평가
 
 ## Slide 7 — Inference 규정 준수
 
@@ -78,6 +75,6 @@
 ## Slide 10 — Reproduction command
 
 - `scripts/run_final_staged_reproduction.sh`
-- `scripts/prepare_final_candidate.py`
+- `scripts/prepare_epoch89_final_candidate.sh`
 - `scripts/run_final_eval.sh`
 - 실제 예상 학습 시간과 evidence 위치

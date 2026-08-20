@@ -4,41 +4,41 @@
 > 최종 마감: **2026-08-20 23:59 KST**, 즉 8월 21일 00:00이 되기 전
 > 목표: 최종 leaderboard 점수와 동일한 체크포인트를, 제출한 README만 따라 **VESSL GTX 1080에서 end-to-end 재현**할 수 있는 상태로 제출한다.
 
-## 현재 확정된 범위
+## 현재 확정된 최종 선택
 
-최종 선택만 보류하고 다음은 코드와 문서로 확정했다.
+최종 제출 모델은 **epoch 89 단일 checkpoint**로 확정했다.
 
 - 학습 schedule은 100 epoch 기준을 유지하되 stage 2를 **완료 epoch 89에서 안전하게 정지**한다.
-- 후보 A `epoch89`: epoch 89 checkpoint를 byte-for-byte 복사한다.
-- 후보 B `avg_80_85_89`: epoch 80/85/89의 floating/complex `state_dict`를 1:1:1 산술평균한다. 정수형 buffer가 다르면 생성 자체를 중단한다.
-- 두 후보 모두 `<candidate>/checkpoints/best_model.pt`와 `candidate_manifest.json`을 가지며, 기존 candidate directory는 덮어쓰지 않는다.
-- 두 후보 모두 동일한 변경 없는 `recon_eval.py`와 `utils/learning/test_part.py` 경로로 평가한다.
+- 최종 candidate ID는 `epoch89`다.
+- epoch 89 checkpoint를 byte-for-byte 복사하며 weight averaging을 하지 않는다.
+- 80/85/89 weight average는 diagnostic 성능 하락으로 최종 제출에서 제외했다.
+- prediction ensemble 구현은 별도 Git branch/commit에만 보존하고 main 및 제출 package에는 포함하지 않는다.
+- `<candidate>/checkpoints/best_model.pt`와 `candidate_manifest.json`을 생성하며 기존 candidate directory는 덮어쓰지 않는다.
+- 변경 없는 `recon_eval.py`와 `utils/learning/test_part.py` 경로로 평가한다.
 - 후보 생성, 공식 평가 log/score JSON, 최종 README 주입, VESSL preflight, package/SHA-256 절차를 자동화했다.
 - `scripts/capture_submission_evidence.sh`로 실행 중인 학습을 건드리지 않고 commit/dirty diff, 환경·GPU·process, 로그·메타데이터, checkpoint hash를 timestamp snapshot으로 보존한다.
 - 제출 PPT outline, 설명 영상 script, evidence index, 이메일 template를 준비했다.
 
 현재 보류된 값은 아래뿐이다.
 
-- 실제 epoch 80/85/89 checkpoint 파일과 각 SHA-256
-- 두 후보의 VESSL 평가 결과
-- 최종 candidate ID, checkpoint SHA-256, leaderboard 점수·시간
+- 실제 epoch 89 checkpoint 파일과 SHA-256
+- epoch89의 VESSL 공식 평가 결과
+- checkpoint SHA-256, leaderboard 점수·시간
 - 최종 선택값을 넣은 PPT/영상 파일과 운영진 양식의 정확한 이메일 외부 파일명
 
 epoch 89가 저장되면 다음 명령부터 진행한다.
 
 ```bash
-RESULT_ROOT=/root/result bash scripts/prepare_both_final_candidates.sh
+RESULT_ROOT=/root/result bash scripts/prepare_epoch89_final_candidate.sh
 
 FINAL_CANDIDATE_DIR=/root/result/final_candidates/epoch89 \
 LEADERBOARD_PATH=/root/Data/leaderboard \
 bash scripts/run_final_eval.sh
-
-FINAL_CANDIDATE_DIR=/root/result/final_candidates/avg_80_85_89 \
-LEADERBOARD_PATH=/root/Data/leaderboard \
-bash scripts/run_final_eval.sh
 ```
 
-최종 선택 뒤에는 해당 candidate의 `eval_metadata_*.json`을 사용해 `scripts/finalize_submission.py`를 실행하고 package를 만든다.
+epoch89 candidate의 `eval_metadata_*.json`을 사용해
+`scripts/finalize_submission.py`를 실행하고 package를 만든다. finalizer는 다른
+candidate ID/mode/epoch을 거부한다.
 
 ## 0. 먼저 고정할 원칙
 

@@ -7,7 +7,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
-  echo "Code-side package inputs are ready. Final-selection inputs still required:"
+  echo "Final selection is fixed to epoch89. Runtime package inputs still required:"
   echo "  FINAL_CANDIDATE_DIR=${FINAL_CANDIDATE_DIR:-<pending>}"
   echo "  EVAL_METADATA=${EVAL_METADATA:-<pending>}"
   echo "  TEAM_NAME_SLUG=${TEAM_NAME_SLUG:-<pending>}"
@@ -111,7 +111,7 @@ for script in \
   run_fivarnet_mraugment.sh \
   run_fivarnet_cross_acc.sh \
   prepare_final_candidate.py \
-  prepare_both_final_candidates.sh \
+  prepare_epoch89_final_candidate.sh \
   run_final_eval.sh \
   capture_submission_evidence.sh \
   parse_recon_eval.py \
