@@ -32,6 +32,23 @@ def parse():
     parser.add_argument('--cascade', type=int, default=1, help='Number of cascades | Should be less than 12') ## important hyperparameter
     parser.add_argument('--chans', type=int, default=9, help='Number of channels for cascade U-Net | 18 in original varnet') ## important hyperparameter
     parser.add_argument('--sens_chans', type=int, default=4, help='Number of channels for sensitivity map U-Net | 8 in original varnet') ## important hyperparameter
+
+    parser.add_argument('--model-name', type=str, default='varnet', choices=['varnet', 'fivarnet'],
+                        help='Model architecture. fivarnet = Feature-Image VarNet (exp/003)')
+    parser.add_argument('--image-cascades', type=int, default=2,
+                        help='[fivarnet] Number of image-space cascades after the feature cascades')
+    parser.add_argument('--pools', type=int, default=4,
+                        help='[fivarnet] Down/up-sampling layers of cascade U-Nets')
+    parser.add_argument('--sens-pools', type=int, default=4,
+                        help='[fivarnet] Down/up-sampling layers of the sensitivity U-Net')
+    parser.add_argument('--attention-cascades', type=int, nargs='*', default=[0],
+                        help='[fivarnet] Feature-cascade indices with aliasing attention (subset keeps 8GB VRAM)')
+    parser.add_argument('--kspace-mult-factor', type=float, default=1e6,
+                        help='[fivarnet] k-space scaling applied before / undone after the cascades')
+    parser.add_argument('--no-grad-checkpoint', action='store_true',
+                        help='[fivarnet] Disable gradient checkpointing (uses more VRAM)')
+    parser.add_argument('--bbox-loss-weight', type=float, default=1.0,
+                        help='Weight of the annotation-box SSIM loss term; 0 = pure foreground SSIM loss')
     parser.add_argument('--input-key', type=str, default='kspace', help='Name of input key')
     parser.add_argument('--target-key', type=str, default='image_label', help='Name of target key')
     parser.add_argument('--max-key', type=str, default='max', help='Name of max key in attributes')

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from utils.data.load_data import create_data_loaders
 from utils.common.utils import save_reconstructions, ssim_loss
-from utils.common.loss_function import SSIMLoss
+from utils.common.bbox_loss import BboxAwareSSIMLoss
 from utils.model.varnet import VarNet
 
 import os
@@ -26,6 +26,34 @@ HISTORY_FIELDS = [
 ]
 
 
+def build_model(args):
+    """Build a model from an args namespace.
+
+    Also used by test_part.load_model with the args stored inside a
+    checkpoint, so every hyperparameter falls back to a default via getattr:
+    older checkpoints (e.g. exp/002) predate the fivarnet arguments.
+    """
+    model_name = getattr(args, 'model_name', 'varnet')
+    if model_name == 'varnet':
+        return VarNet(num_cascades=args.cascade,
+                      chans=args.chans,
+                      sens_chans=args.sens_chans)
+    if model_name == 'fivarnet':
+        from utils.model.fi_varnet import FIVarNet
+        return FIVarNet(
+            num_cascades=args.cascade,
+            num_image_cascades=getattr(args, 'image_cascades', 2),
+            sens_chans=args.sens_chans,
+            sens_pools=getattr(args, 'sens_pools', 4),
+            chans=args.chans,
+            pools=getattr(args, 'pools', 4),
+            attention_cascades=getattr(args, 'attention_cascades', None),
+            kspace_mult_factor=getattr(args, 'kspace_mult_factor', 1e6),
+            use_checkpoint=not getattr(args, 'no_grad_checkpoint', False),
+        )
+    raise ValueError(f'Unknown model name: {model_name}')
+
+
 def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
     model.train()
     start_epoch = start_iter = time.perf_counter()
@@ -33,14 +61,15 @@ def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, device):
     total_loss = 0.
 
     for iter, data in enumerate(data_loader):
-        mask, kspace, target, maximum, _, _ = data
+        mask, kspace, target, maximum, _, _, boxes = data
         mask = mask.to(device=device, non_blocking=True)
         kspace = kspace.to(device=device, non_blocking=True)
         target = target.to(device=device, non_blocking=True)
         maximum = maximum.to(device=device, non_blocking=True)
+        # boxes stay on the CPU: only their integer coordinates are used for cropping.
 
         output = model(kspace, mask)
-        loss = loss_type(output, target, maximum)
+        loss = loss_type(output, target, maximum, boxes)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -66,7 +95,7 @@ def validate(args, model, data_loader, device):
 
     with torch.no_grad():
         for iter, data in enumerate(data_loader):
-            mask, kspace, target, _, fnames, slices = data
+            mask, kspace, target, _, fnames, slices, _ = data
             kspace = kspace.to(device=device, non_blocking=True)
             mask = mask.to(device=device, non_blocking=True)
             output = model(kspace, mask)
@@ -215,12 +244,12 @@ def train(args):
         torch.cuda.set_device(device)
     print('Training device:', device)
 
-    model = VarNet(num_cascades=args.cascade, 
-                   chans=args.chans, 
-                   sens_chans=args.sens_chans)
+    model = build_model(args)
     model.to(device=device)
 
-    loss_type = SSIMLoss().to(device=device)
+    loss_type = BboxAwareSSIMLoss(
+        bbox_weight=getattr(args, 'bbox_loss_weight', 1.0)
+    ).to(device=device)
     optimizer = torch.optim.Adam(model.parameters(), args.lr)
 
     best_val_loss = float('inf')
